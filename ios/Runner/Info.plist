@@ -13,7 +13,7 @@
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
-	<string>nool</string>
+	<string>Nool</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
@@ -41,20 +41,29 @@
 		<string>UIInterfaceOrientationLandscapeLeft</string>
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
+	<!-- 120 Hz / ProMotion + pointer support -->
 	<key>CADisableMinimumFrameDurationOnPhone</key>
 	<true/>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
 
-	<!-- Kamera / mikrofon / konum (App Store usage descriptions) -->
+	<!--
+	  Privacy usage descriptions (Turkish — match in-app copy).
+	  Only when-in-use location; no Always / background location keys.
+	  Photo Library: gallery video drops + profile avatar (no save-to-library Add key).
+	  No UIBackgroundModes — app does not run location/audio in background.
+	  No ATS exceptions — Supabase/OAuth are HTTPS.
+	  Google Sign-In: add CFBundleURLTypes with your iOS reversed client ID in Xcode
+	  (see deliverable summary / Google Cloud Console → iOS client).
+	-->
 	<key>NSLocationWhenInUseUsageDescription</key>
-	<string>Kampüsteki sana en yakın dedikodu ve kaotik videoları listelemek için konumuna ihtiyacımız var! Konumsuz nooluyor bilemeyiz.</string>
-	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
 	<string>Kampüsteki sana en yakın dedikodu ve kaotik videoları listelemek için konumuna ihtiyacımız var! Konumsuz nooluyor bilemeyiz.</string>
 	<key>NSCameraUsageDescription</key>
 	<string>Gizemli maskeni takıp kampüse video bırakabilmen (drop etmen) için kamerana erişmemiz gerekiyor.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Videolarına ses ekleyebilmen veya gizem modunda sesini robotlaştırabilmen için mikrofonunu açmalısın.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Galerinden video veya profil fotoğrafı seçebilmen için fotoğraf kütüphanene erişmemiz gerekiyor.</string>
 
 	<!-- Export compliance (App Store Connect / TestFlight) -->
 	<key>ITSAppUsesNonExemptEncryption</key>

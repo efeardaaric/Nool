@@ -10,6 +10,7 @@ class OnboardingService {
   static const _deviceIdKey = 'device_id';
   static const _usernameKey = 'username';
   static const _onboardedKey = 'nool_onboarded';
+  static const _introSeenKey = 'nool_intro_seen';
 
   /// Eski anahtarlar — bir kez migrate edilir.
   static const _legacyDeviceIdKey = 'nool_device_id';
@@ -84,6 +85,17 @@ class OnboardingService {
     final prefs = await SharedPreferences.getInstance();
     await _migrateLegacyKeys(prefs);
     return prefs.getString(_usernameKey);
+  }
+
+  /// Eğitici karşılama turu görüldü mü / atlandı mı.
+  static Future<bool> hasSeenIntro() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getBool(_introSeenKey) ?? false;
+  }
+
+  static Future<void> markIntroSeen() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_introSeenKey, true);
   }
 
   static String _generateUsername() {

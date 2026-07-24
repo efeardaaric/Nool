@@ -5,13 +5,12 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../services/auth_service.dart';
-import '../services/onboarding_service.dart';
 import '../theme/app_theme.dart';
 import '../theme/colors.dart';
 import '../widgets/nool_chrome.dart';
 import '../widgets/nool_logo.dart';
 import '../widgets/nool_lottie.dart';
-import 'layout_manager.dart';
+import 'location_gate_screen.dart';
 import 'sign_up_screen.dart';
 
 /// Neo-brutalist Giriş Yap — Google / Apple / e-posta.
@@ -19,10 +18,14 @@ class SignInScreen extends StatefulWidget {
   const SignInScreen({
     super.key,
     this.popOnSuccess = false,
+    this.gateMode = false,
   });
 
   /// Shell içinden açıldıysa true — LayoutManager'a replace etmez, pop eder.
   final bool popOnSuccess;
+
+  /// Splash/intro sonrası zorunlu giriş — geri ile uygulamaya sızılmaz.
+  final bool gateMode;
 
   @override
   State<SignInScreen> createState() => _SignInScreenState();
@@ -73,14 +76,10 @@ class _SignInScreenState extends State<SignInScreen>
       return;
     }
 
-    final username =
-        AuthService().displayName ??
-        await OnboardingService.getUsername() ??
-        '@anon_kayip_kaos';
     if (!mounted) return;
     await Navigator.of(context).pushReplacement(
       noolRoute<void>(
-        page: LayoutManager(username: username),
+        page: const LocationGateScreen(),
         duration: const Duration(milliseconds: 480),
       ),
     );
@@ -163,7 +162,9 @@ class _SignInScreenState extends State<SignInScreen>
   Widget build(BuildContext context) {
     final bottomInset = MediaQuery.viewInsetsOf(context).bottom;
 
-    return Scaffold(
+    return PopScope(
+      canPop: !widget.gateMode,
+      child: Scaffold(
       resizeToAvoidBottomInset: true,
       body: Stack(
         fit: StackFit.expand,
@@ -193,6 +194,17 @@ class _SignInScreenState extends State<SignInScreen>
                             height: 1,
                           ),
                         ),
+                        if (widget.gateMode) ...[
+                          const SizedBox(height: 8),
+                          Text(
+                            'Devam etmek için giriş yap veya hesap oluştur.',
+                            style: GoogleFonts.syne(
+                              color: NoolColors.lavender,
+                              fontWeight: FontWeight.w600,
+                              fontSize: 13,
+                            ),
+                          ),
+                        ],
                         const SizedBox(height: 14),
                         Text(
                           'Giriş Yap',
@@ -328,6 +340,7 @@ class _SignInScreenState extends State<SignInScreen>
                               MaterialPageRoute<bool>(
                                 builder: (_) => SignUpScreen(
                                   popOnSuccess: widget.popOnSuccess,
+                                  gateMode: widget.gateMode,
                                 ),
                               ),
                             );
@@ -365,6 +378,7 @@ class _SignInScreenState extends State<SignInScreen>
           ),
         ],
       ),
+    ),
     );
   }
 }

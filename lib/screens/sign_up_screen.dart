@@ -3,12 +3,11 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../services/auth_service.dart';
-import '../services/onboarding_service.dart';
 import '../theme/app_theme.dart';
 import '../theme/colors.dart';
 import '../widgets/nool_chrome.dart';
 import '../widgets/nool_logo.dart';
-import 'layout_manager.dart';
+import 'location_gate_screen.dart';
 import 'sign_in_screen.dart';
 
 /// Neo-brutalist Kayıt Ol — Google / Apple / e-posta.
@@ -16,9 +15,11 @@ class SignUpScreen extends StatefulWidget {
   const SignUpScreen({
     super.key,
     this.popOnSuccess = false,
+    this.gateMode = false,
   });
 
   final bool popOnSuccess;
+  final bool gateMode;
 
   @override
   State<SignUpScreen> createState() => _SignUpScreenState();
@@ -71,14 +72,10 @@ class _SignUpScreenState extends State<SignUpScreen>
       return;
     }
 
-    final username =
-        AuthService().displayName ??
-        await OnboardingService.getUsername() ??
-        '@anon_kayip_kaos';
     if (!mounted) return;
     await Navigator.of(context).pushAndRemoveUntil(
       noolRoute<void>(
-        page: LayoutManager(username: username),
+        page: const LocationGateScreen(),
         duration: const Duration(milliseconds: 480),
       ),
       (_) => false,
@@ -148,7 +145,9 @@ class _SignUpScreenState extends State<SignUpScreen>
   Widget build(BuildContext context) {
     final bottomInset = MediaQuery.viewInsetsOf(context).bottom;
 
-    return Scaffold(
+    return PopScope(
+      canPop: !widget.gateMode,
+      child: Scaffold(
       resizeToAvoidBottomInset: true,
       body: Stack(
         fit: StackFit.expand,
@@ -348,6 +347,7 @@ class _SignUpScreenState extends State<SignUpScreen>
                               MaterialPageRoute<void>(
                                 builder: (_) => SignInScreen(
                                   popOnSuccess: widget.popOnSuccess,
+                                  gateMode: widget.gateMode,
                                 ),
                               ),
                             );
@@ -381,6 +381,7 @@ class _SignUpScreenState extends State<SignUpScreen>
           ),
         ],
       ),
+    ),
     );
   }
 }

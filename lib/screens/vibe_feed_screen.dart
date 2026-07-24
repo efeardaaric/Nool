@@ -1,6 +1,7 @@
-import 'dart:ui';
+import 'dart:async';
 
 import 'package:cached_video_player_plus/cached_video_player_plus.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -9,6 +10,7 @@ import '../models/vibe_post.dart';
 import '../icons/nool_emojis.dart';
 import '../icons/nool_icons.dart';
 import '../services/location_service.dart';
+import '../services/profile_service.dart';
 import '../services/supabase_service.dart';
 import '../theme/colors.dart';
 import '../widgets/comments_sheet.dart';
@@ -37,28 +39,36 @@ class VibeFeedScreen extends StatefulWidget {
   State<VibeFeedScreen> createState() => VibeFeedScreenState();
 }
 
-class VibeFeedScreenState extends State<VibeFeedScreen> {
+class VibeFeedScreenState extends State<VibeFeedScreen>
+    with WidgetsBindingObserver {
   static const _tabs = ['Near You', 'Vibing', 'Campus'];
 
   late final PageController _pageController;
   late List<VibePost> _posts;
 
-  int _currentIndex = 0;
-  int _activeTab = 1;
+  /// Page change / playback gate — parent setState olmadan sayfaları günceller.
+  final ValueNotifier<int> _currentIndex = ValueNotifier<int>(0);
+  final ValueNotifier<bool> _playbackGate = ValueNotifier<bool>(true);
+
   int _navIndex = 1;
   final Set<String> _vibedIds = {};
   HotspotFeedFilter? _hotspotFilter;
 
   /// Artan id — eski async yüklemeleri yok saymak için.
   int _loadGeneration = 0;
+  int _reloadToken = 0;
+  Timer? _reloadDebounce;
   bool _radarVisible = false;
+  bool _appResumed = true;
   NearbyScanProgress? _scanProgress;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _pageController = PageController();
     _posts = List<VibePost>.from(_demoPosts);
+    _playbackGate.value = widget.isFeedActive;
     SystemChrome.setSystemUIOverlayStyle(
       const SystemUiOverlayStyle(
         statusBarColor: Colors.transparent,
@@ -70,7 +80,47 @@ class VibeFeedScreenState extends State<VibeFeedScreen> {
     _loadFeed();
   }
 
-  Future<void> reloadFeed() => _loadFeed();
+  @override
+  void didUpdateWidget(covariant VibeFeedScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.isFeedActive != widget.isFeedActive) {
+      _syncPlaybackGate();
+    }
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    final resumed = state == AppLifecycleState.resumed;
+    if (resumed == _appResumed) return;
+    _appResumed = resumed;
+    _syncPlaybackGate();
+  }
+
+  void _syncPlaybackGate() {
+    final next = widget.isFeedActive && !_radarVisible && _appResumed;
+    if (_playbackGate.value != next) {
+      _playbackGate.value = next;
+    }
+  }
+
+  /// Kamera drop sonrası vb. — hızlı ardışık çağrıları birleştir.
+  Future<void> reloadFeed() async {
+    _reloadDebounce?.cancel();
+    final token = ++_reloadToken;
+    final done = Completer<void>();
+    _reloadDebounce = Timer(const Duration(milliseconds: 320), () async {
+      if (!mounted || token != _reloadToken) {
+        done.complete();
+        return;
+      }
+      try {
+        await _loadFeed();
+      } finally {
+        if (!done.isCompleted) done.complete();
+      }
+    });
+    return done.future;
+  }
 
   /// Trend ekranından gelen konum filtresi.
   Future<void> applyHotspotFilter(CampusHotspot hotspot) async {
@@ -80,7 +130,6 @@ class VibeFeedScreenState extends State<VibeFeedScreen> {
         longitude: hotspot.longitude,
         name: hotspot.name,
       );
-      _activeTab = 0;
     });
     await _loadFeed();
   }
@@ -97,10 +146,14 @@ class VibeFeedScreenState extends State<VibeFeedScreen> {
     final generation = ++_loadGeneration;
     bool isStale() => !mounted || generation != _loadGeneration;
 
+    // Best-effort TTL temizliği — feed’i bloklamaz.
+    unawaited(supabase.purgeExpiredVideosBestEffort());
+
     setState(() {
       _radarVisible = true;
       _scanProgress = NearbyScanProgress.radius(radiusMeters: 500);
     });
+    _syncPlaybackGate();
 
     try {
       late final double lat;
@@ -153,25 +206,45 @@ class VibeFeedScreenState extends State<VibeFeedScreen> {
 
       if (isStale()) return;
 
-      if (remote.isEmpty && filter == null && !usedFallback) {
+      // Engellenen kullanıcıların drop'larını gizle (username eşleşmesi).
+      var filtered = remote;
+      try {
+        final blocked = await ProfileService().blockedUsernameKeys();
+        if (blocked.isNotEmpty) {
+          filtered = remote
+              .where(
+                (p) => !ProfileService.usernameMatchesBlocked(
+                  p.username,
+                  blocked,
+                ),
+              )
+              .toList(growable: false);
+        }
+      } catch (_) {}
+
+      if (isStale()) return;
+
+      if (filtered.isEmpty && filter == null && !usedFallback) {
         // Genişletme + fallback boş — demo kalsın, radar kapansın.
         setState(() {
           _radarVisible = false;
           _scanProgress = null;
         });
+        _syncPlaybackGate();
         return;
       }
 
       setState(() {
-        if (remote.isEmpty && filter != null) {
+        if (filtered.isEmpty && filter != null) {
           _posts = const [];
-        } else if (remote.isNotEmpty) {
-          _posts = remote;
-          _currentIndex = 0;
+        } else if (filtered.isNotEmpty) {
+          _posts = filtered;
+          _currentIndex.value = 0;
         }
         _radarVisible = false;
         _scanProgress = null;
       });
+      _syncPlaybackGate();
       if (_posts.isNotEmpty && _pageController.hasClients) {
         _pageController.jumpToPage(0);
       }
@@ -182,52 +255,61 @@ class VibeFeedScreenState extends State<VibeFeedScreen> {
           _radarVisible = false;
           _scanProgress = null;
         });
+        _syncPlaybackGate();
       }
     }
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _loadGeneration++;
+    _reloadDebounce?.cancel();
+    _reloadToken++;
     _pageController.dispose();
+    _currentIndex.dispose();
+    _playbackGate.dispose();
     super.dispose();
   }
 
   void _onPageChanged(int index) {
-    setState(() => _currentIndex = index);
+    if (_currentIndex.value != index) {
+      _currentIndex.value = index;
+    }
   }
 
   void _toggleVibe(String id) {
-    setState(() {
-      if (_vibedIds.contains(id)) {
-        _vibedIds.remove(id);
-      } else {
-        _vibedIds.add(id);
-      }
-    });
+    // UI state _VibePage içinde — feed setState yok.
+    if (_vibedIds.contains(id)) {
+      _vibedIds.remove(id);
+    } else {
+      _vibedIds.add(id);
+    }
   }
 
   void _reportPost(String id) {
     final removedIndex = _posts.indexWhere((p) => p.id == id);
     if (removedIndex < 0) return;
 
+    var nextIndex = _currentIndex.value;
     setState(() {
       _posts.removeAt(removedIndex);
       if (_posts.isEmpty) {
-        _currentIndex = 0;
+        nextIndex = 0;
         return;
       }
-      if (_currentIndex >= _posts.length) {
-        _currentIndex = _posts.length - 1;
-      } else if (removedIndex < _currentIndex) {
-        _currentIndex -= 1;
+      if (nextIndex >= _posts.length) {
+        nextIndex = _posts.length - 1;
+      } else if (removedIndex < nextIndex) {
+        nextIndex -= 1;
       }
     });
+    _currentIndex.value = nextIndex;
 
     if (_posts.isNotEmpty && _pageController.hasClients) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!_pageController.hasClients) return;
-        _pageController.jumpToPage(_currentIndex);
+        _pageController.jumpToPage(_currentIndex.value);
       });
     }
 
@@ -266,7 +348,7 @@ class VibeFeedScreenState extends State<VibeFeedScreen> {
                 } else {
                   setState(() {
                     _posts = List<VibePost>.from(_demoPosts);
-                    _currentIndex = 0;
+                    _currentIndex.value = 0;
                   });
                   await _loadFeed();
                 }
@@ -283,16 +365,16 @@ class VibeFeedScreenState extends State<VibeFeedScreen> {
                   controller: _pageController,
                   scrollDirection: Axis.vertical,
                   itemCount: _posts.length,
+                  allowImplicitScrolling: false,
                   onPageChanged: _onPageChanged,
                   itemBuilder: (context, index) {
                     final post = _posts[index];
-                    final pageVisible = index == _currentIndex;
                     return _VibePage(
                       key: ValueKey(post.id),
                       post: post,
-                      isActive: pageVisible,
-                      isPlaybackEnabled:
-                          widget.isFeedActive && pageVisible && !_radarVisible,
+                      pageIndex: index,
+                      currentIndexListenable: _currentIndex,
+                      playbackGateListenable: _playbackGate,
                       isVibed: _vibedIds.contains(post.id),
                       onVibe: () => _toggleVibe(post.id),
                       onReport: () => _reportPost(post.id),
@@ -307,11 +389,9 @@ class VibeFeedScreenState extends State<VibeFeedScreen> {
                     children: [
                       _TopBar(
                         tabs: _tabs,
-                        activeTab: _activeTab,
-                        onTabSelected: (i) => setState(() => _activeTab = i),
                         onReportCurrent: () {
                           if (_posts.isEmpty) return;
-                          _reportPost(_posts[_currentIndex].id);
+                          _reportPost(_posts[_currentIndex.value].id);
                         },
                       ),
                       if (_hotspotFilter != null)
@@ -360,12 +440,17 @@ class VibeFeedScreenState extends State<VibeFeedScreen> {
                     left: 0,
                     right: 0,
                     bottom: 0,
-                    child: _BottomChrome(
-                      navIndex: _navIndex,
-                      onNavTap: (i) => setState(() => _navIndex = i),
-                      progress: _posts.isEmpty
-                          ? 0
-                          : (_currentIndex + 1) / _posts.length,
+                    child: ValueListenableBuilder<int>(
+                      valueListenable: _currentIndex,
+                      builder: (context, index, _) {
+                        return _BottomChrome(
+                          navIndex: _navIndex,
+                          onNavTap: (i) => setState(() => _navIndex = i),
+                          progress: _posts.isEmpty
+                              ? 0
+                              : (index + 1) / _posts.length,
+                        );
+                      },
                     ),
                   )
                 else
@@ -373,11 +458,18 @@ class VibeFeedScreenState extends State<VibeFeedScreen> {
                     left: 0,
                     right: 0,
                     bottom: bottomInset,
-                    child: LinearProgressIndicator(
-                      value: (_currentIndex + 1) / _posts.length,
-                      minHeight: 2.5,
-                      backgroundColor: Colors.white12,
-                      color: NoolColors.acid,
+                    child: ValueListenableBuilder<int>(
+                      valueListenable: _currentIndex,
+                      builder: (context, index, _) {
+                        return LinearProgressIndicator(
+                          value: _posts.isEmpty
+                              ? 0
+                              : (index + 1) / _posts.length,
+                          minHeight: 2.5,
+                          backgroundColor: Colors.white12,
+                          color: NoolColors.acid,
+                        );
+                      },
                     ),
                   ),
               ],
@@ -516,27 +608,31 @@ class _NoolRadarOverlayState extends State<NoolRadarOverlay>
   }
 }
 
-class _TopBar extends StatelessWidget {
+class _TopBar extends StatefulWidget {
   const _TopBar({
     required this.tabs,
-    required this.activeTab,
-    required this.onTabSelected,
     required this.onReportCurrent,
   });
 
   final List<String> tabs;
-  final int activeTab;
-  final ValueChanged<int> onTabSelected;
   final VoidCallback onReportCurrent;
 
   @override
+  State<_TopBar> createState() => _TopBarState();
+}
+
+class _TopBarState extends State<_TopBar> {
+  int _activeTab = 1;
+
+  @override
   Widget build(BuildContext context) {
+    final tabs = widget.tabs;
     return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 8, 8, 0),
+      padding: const EdgeInsets.fromLTRB(12, 8, 4, 0),
       child: Row(
         children: [
-          const NoolLogoMark(size: 32, border: true, shadow: false),
-          const SizedBox(width: 10),
+          const NoolLogoMark(size: 28, border: true, shadow: false),
+          const SizedBox(width: 8),
           ShaderMask(
             blendMode: BlendMode.srcIn,
             shaderCallback: (bounds) {
@@ -548,61 +644,76 @@ class _TopBar extends StatelessWidget {
               'NOOL',
               style: Theme.of(context).textTheme.titleLarge?.copyWith(
                     fontWeight: FontWeight.w800,
-                    fontSize: 24,
+                    fontSize: 20,
                     letterSpacing: -0.8,
                     color: Colors.white,
                   ),
             ),
           ),
-          const Spacer(),
-          for (var i = 0; i < tabs.length; i++) ...[
-            GestureDetector(
-              onTap: () => onTabSelected(i),
-              behavior: HitTestBehavior.opaque,
-              child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(
-                      tabs[i],
-                      style: Theme.of(context).textTheme.labelLarge?.copyWith(
-                            color: i == activeTab
-                                ? NoolColors.white
-                                : NoolColors.lavender,
-                            fontWeight:
-                                i == activeTab ? FontWeight.w800 : FontWeight.w600,
-                            fontSize: 13,
-                          ),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: [
+                for (var i = 0; i < tabs.length; i++)
+                  Flexible(
+                    child: GestureDetector(
+                      onTap: () {
+                        if (_activeTab == i) return;
+                        setState(() => _activeTab = i);
+                      },
+                      behavior: HitTestBehavior.opaque,
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 4,
+                          vertical: 6,
+                        ),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(
+                              tabs[i],
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              textAlign: TextAlign.center,
+                              style: Theme.of(context)
+                                  .textTheme
+                                  .labelLarge
+                                  ?.copyWith(
+                                    color: i == _activeTab
+                                        ? NoolColors.white
+                                        : NoolColors.lavender,
+                                    fontWeight: i == _activeTab
+                                        ? FontWeight.w800
+                                        : FontWeight.w600,
+                                    fontSize: 12,
+                                  ),
+                            ),
+                            const SizedBox(height: 4),
+                            AnimatedContainer(
+                              duration: const Duration(milliseconds: 200),
+                              height: 3,
+                              width: i == _activeTab ? 22 : 0,
+                              color: NoolColors.acid,
+                            ),
+                          ],
+                        ),
+                      ),
                     ),
-                    const SizedBox(height: 4),
-                    AnimatedContainer(
-                      duration: const Duration(milliseconds: 200),
-                      height: 3,
-                      width: i == activeTab ? 28 : 0,
-                      color: NoolColors.acid,
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ],
-          const Spacer(),
-          IconButton(
-            onPressed: onReportCurrent,
-            tooltip: 'Rapor et',
-            icon: const NoolIcon(
-              NoolIconData.flag,
-              color: NoolColors.white,
-              size: 22,
+                  ),
+              ],
             ),
           ),
           IconButton(
-            onPressed: () {},
+            onPressed: widget.onReportCurrent,
+            tooltip: 'Rapor et',
+            visualDensity: VisualDensity.compact,
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints(minWidth: 40, minHeight: 40),
             icon: const NoolIcon(
-              NoolIconData.search,
+              NoolIconData.flag,
               color: NoolColors.white,
-              size: 24,
+              size: 20,
             ),
           ),
         ],
@@ -615,8 +726,9 @@ class _VibePage extends StatefulWidget {
   const _VibePage({
     super.key,
     required this.post,
-    required this.isActive,
-    required this.isPlaybackEnabled,
+    required this.pageIndex,
+    required this.currentIndexListenable,
+    required this.playbackGateListenable,
     required this.isVibed,
     required this.onVibe,
     required this.onReport,
@@ -624,8 +736,9 @@ class _VibePage extends StatefulWidget {
   });
 
   final VibePost post;
-  final bool isActive;
-  final bool isPlaybackEnabled;
+  final int pageIndex;
+  final ValueListenable<int> currentIndexListenable;
+  final ValueListenable<bool> playbackGateListenable;
   final bool isVibed;
   final VoidCallback onVibe;
   final VoidCallback onReport;
@@ -639,6 +752,9 @@ class _VibePageState extends State<_VibePage> {
   CachedVideoPlayerPlusController? _controller;
   bool _ready = false;
   bool _failed = false;
+  bool _wantController = false;
+  bool _wantPlayback = false;
+  late bool _isVibed;
   NoolEmojiData? _selectedReaction;
   final Map<NoolEmojiData, int> _reactionCounts = {
     NoolEmojiData.cool: 12,
@@ -670,38 +786,72 @@ class _VibePageState extends State<_VibePage> {
     });
   }
 
+  void _toggleVibeLocal() {
+    setState(() => _isVibed = !_isVibed);
+    widget.onVibe();
+  }
+
+  int get _distanceFromCurrent =>
+      (widget.currentIndexListenable.value - widget.pageIndex).abs();
+
+  bool get _shouldHaveController => _distanceFromCurrent <= 1;
+
+  bool get _shouldPlay =>
+      widget.currentIndexListenable.value == widget.pageIndex &&
+      widget.playbackGateListenable.value;
+
   @override
   void initState() {
     super.initState();
-    if (widget.isActive) {
+    _isVibed = widget.isVibed;
+    _wantController = _shouldHaveController;
+    _wantPlayback = _shouldPlay;
+    widget.currentIndexListenable.addListener(_onFeedIndex);
+    widget.playbackGateListenable.addListener(_onPlaybackGate);
+    if (_wantController) {
       _attach();
-    }
-  }
-
-  @override
-  void didUpdateWidget(covariant _VibePage oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (widget.isActive && !oldWidget.isActive) {
-      _attach();
-    } else if (!widget.isActive && oldWidget.isActive) {
-      _detach();
-    } else if (widget.isActive &&
-        widget.isPlaybackEnabled != oldWidget.isPlaybackEnabled) {
-      _syncPlayback();
     }
   }
 
   @override
   void dispose() {
+    widget.currentIndexListenable.removeListener(_onFeedIndex);
+    widget.playbackGateListenable.removeListener(_onPlaybackGate);
     final controller = _controller;
     _controller = null;
     controller?.dispose();
     super.dispose();
   }
 
+  void _onFeedIndex() {
+    final needController = _shouldHaveController;
+    final needPlay = _shouldPlay;
+    if (needController != _wantController) {
+      _wantController = needController;
+      _wantPlayback = needPlay;
+      if (needController) {
+        _attach();
+      } else {
+        _detach();
+      }
+      return;
+    }
+    if (needPlay != _wantPlayback) {
+      _wantPlayback = needPlay;
+      _syncPlayback();
+    }
+  }
+
+  void _onPlaybackGate() {
+    final needPlay = _shouldPlay;
+    if (needPlay == _wantPlayback) return;
+    _wantPlayback = needPlay;
+    _syncPlayback();
+  }
+
   Future<void> _attach() async {
     await _detach();
-    if (!mounted) return;
+    if (!mounted || !_wantController) return;
 
     final controller = CachedVideoPlayerPlusController.networkUrl(
       Uri.parse(widget.post.videoUrl),
@@ -711,17 +861,18 @@ class _VibePageState extends State<_VibePage> {
     _controller = controller;
     _ready = false;
     _failed = false;
-    setState(() {});
+    if (mounted) setState(() {});
 
     try {
       await controller.initialize();
-      if (!mounted || _controller != controller) {
+      if (!mounted || _controller != controller || !_wantController) {
         await controller.dispose();
+        if (_controller == controller) _controller = null;
         return;
       }
       await controller.setLooping(true);
       await controller.setVolume(0);
-      if (widget.isPlaybackEnabled) {
+      if (_wantPlayback) {
         await controller.play();
       } else {
         await controller.pause();
@@ -746,7 +897,7 @@ class _VibePageState extends State<_VibePage> {
     final controller = _controller;
     if (controller == null || !_ready) return;
     try {
-      if (widget.isPlaybackEnabled) {
+      if (_wantPlayback) {
         await controller.play();
       } else {
         await controller.pause();
@@ -757,8 +908,9 @@ class _VibePageState extends State<_VibePage> {
   Future<void> _detach() async {
     final controller = _controller;
     _controller = null;
+    final wasReady = _ready;
     _ready = false;
-    if (mounted) setState(() {});
+    if (wasReady && mounted) setState(() {});
     if (controller != null) {
       try {
         await controller.pause();
@@ -777,26 +929,34 @@ class _VibePageState extends State<_VibePage> {
       children: [
         const ColoredBox(color: NoolColors.night),
         if (_ready && _controller != null)
-          FittedBox(
-            fit: BoxFit.cover,
-            child: SizedBox(
-              width: _controller!.value.size.width,
-              height: _controller!.value.size.height,
-              child: CachedVideoPlayerPlus(_controller!),
+          RepaintBoundary(
+            child: FittedBox(
+              fit: BoxFit.cover,
+              child: SizedBox(
+                width: _controller!.value.size.width,
+                height: _controller!.value.size.height,
+                child: CachedVideoPlayerPlus(_controller!),
+              ),
             ),
           )
-        else
-          Center(
-            child: _failed
-                ? const Icon(Icons.videocam_off, color: NoolColors.lavender, size: 40)
-                : const NoolLottieView.loading(
-                    width: 56,
-                    height: 56,
-                    compact: true,
-                  ),
+        else if (_failed)
+          const Center(
+            child: Icon(
+              Icons.videocam_off,
+              color: NoolColors.lavender,
+              size: 40,
+            ),
+          )
+        else if (_wantController)
+          const Center(
+            child: NoolLottieView.loading(
+              width: 56,
+              height: 56,
+              compact: true,
+            ),
           ),
         // Alt gradient — metin okunabilirliği
-        Positioned(
+        const Positioned(
           left: 0,
           right: 0,
           bottom: 0,
@@ -808,7 +968,7 @@ class _VibePageState extends State<_VibePage> {
                 end: Alignment.bottomCenter,
                 colors: [
                   Colors.transparent,
-                  NoolColors.night.withOpacity(0.75),
+                  Color(0xBF0D0A1C),
                 ],
               ),
             ),
@@ -844,14 +1004,14 @@ class _VibePageState extends State<_VibePage> {
           right: 10,
           bottom: bottomPad + 8,
           child: _ActionRail(
-            isVibed: widget.isVibed,
+            isVibed: _isVibed,
             vibeLabel: widget.post.vibeCountLabel,
             commentLabel: widget.post.commentCountLabel,
-            onVibe: widget.onVibe,
-                      onComment: () => showCommentsSheet(
-                        context,
-                        videoId: widget.post.id,
-                      ),
+            onVibe: _toggleVibeLocal,
+            onComment: () => showCommentsSheet(
+              context,
+              videoId: widget.post.id,
+            ),
             onShare: () {},
           ),
         ),
@@ -891,141 +1051,135 @@ class _InfoCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(16),
-      child: BackdropFilter(
-        filter: ImageFilter.blur(sigmaX: 18, sigmaY: 18),
-        child: Container(
-          padding: const EdgeInsets.fromLTRB(12, 12, 12, 12),
-          decoration: BoxDecoration(
-            color: Colors.black.withOpacity(0.42),
-            borderRadius: BorderRadius.circular(16),
-            border: Border.all(color: Colors.white.withOpacity(0.18), width: 1.2),
+    return Container(
+      padding: const EdgeInsets.fromLTRB(12, 12, 12, 12),
+      decoration: BoxDecoration(
+        color: const Color(0xD90D0A1C),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: Colors.white.withOpacity(0.18), width: 1.2),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // Neo-brutalist mesafe rozeti
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+            decoration: BoxDecoration(
+              color: NoolColors.acid,
+              border: Border.all(color: NoolColors.ink, width: 2.5),
+              boxShadow: const [
+                BoxShadow(
+                  color: NoolColors.ink,
+                  offset: Offset(2, 2),
+                  blurRadius: 0,
+                ),
+              ],
+            ),
+            child: Text(
+              '• ${post.distanceLabel}',
+              style: Theme.of(context).textTheme.labelLarge?.copyWith(
+                    color: NoolColors.ink,
+                    fontWeight: FontWeight.w800,
+                    fontSize: 12,
+                  ),
+            ),
           ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            mainAxisSize: MainAxisSize.min,
+          const SizedBox(height: 12),
+          Row(
             children: [
-              // Neo-brutalist mesafe rozeti
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-                decoration: BoxDecoration(
-                  color: NoolColors.acid,
-                  border: Border.all(color: NoolColors.ink, width: 2.5),
-                  boxShadow: const [
-                    BoxShadow(
+              GestureDetector(
+                onTap: () {
+                  Navigator.of(context).push(
+                    OtherProfileScreen.route(username: post.username),
+                  );
+                },
+                child: CircleAvatar(
+                  radius: 16,
+                  backgroundColor: post.avatarColor,
+                  child: Text(
+                    post.username
+                        .replaceFirst('@', '')
+                        .substring(0, 1)
+                        .toUpperCase(),
+                    style: const TextStyle(
                       color: NoolColors.ink,
-                      offset: Offset(2, 2),
-                      blurRadius: 0,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    GestureDetector(
+                      onTap: () {
+                        Navigator.of(context).push(
+                          OtherProfileScreen.route(
+                            username: post.username,
+                          ),
+                        );
+                      },
+                      child: Text(
+                        post.username,
+                        style: Theme.of(context)
+                            .textTheme
+                            .titleMedium
+                            ?.copyWith(
+                              color: NoolColors.white,
+                              fontWeight: FontWeight.w800,
+                              fontSize: 15,
+                            ),
+                      ),
+                    ),
+                    Text(
+                      post.subtitle,
+                      style:
+                          Theme.of(context).textTheme.bodySmall?.copyWith(
+                                color: NoolColors.lavender,
+                                fontSize: 12,
+                              ),
                     ),
                   ],
                 ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Text(
+            post.caption,
+            style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                  color: NoolColors.white,
+                  fontSize: 14,
+                  height: 1.35,
+                  fontWeight: FontWeight.w500,
+                ),
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              const NoolIcon(
+                NoolIconData.music,
+                size: 14,
+                color: NoolColors.lavender,
+              ),
+              const SizedBox(width: 4),
+              Expanded(
                 child: Text(
-                  '• ${post.distanceLabel}',
-                  style: Theme.of(context).textTheme.labelLarge?.copyWith(
-                        color: NoolColors.ink,
-                        fontWeight: FontWeight.w800,
+                  post.trackLabel,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: NoolColors.lavender,
                         fontSize: 12,
                       ),
                 ),
               ),
-              const SizedBox(height: 12),
-              Row(
-                children: [
-                  GestureDetector(
-                    onTap: () {
-                      Navigator.of(context).push(
-                        OtherProfileScreen.route(username: post.username),
-                      );
-                    },
-                    child: CircleAvatar(
-                      radius: 16,
-                      backgroundColor: post.avatarColor,
-                      child: Text(
-                        post.username
-                            .replaceFirst('@', '')
-                            .substring(0, 1)
-                            .toUpperCase(),
-                        style: const TextStyle(
-                          color: NoolColors.ink,
-                          fontWeight: FontWeight.w800,
-                        ),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        GestureDetector(
-                          onTap: () {
-                            Navigator.of(context).push(
-                              OtherProfileScreen.route(
-                                username: post.username,
-                              ),
-                            );
-                          },
-                          child: Text(
-                            post.username,
-                            style: Theme.of(context)
-                                .textTheme
-                                .titleMedium
-                                ?.copyWith(
-                                  color: NoolColors.white,
-                                  fontWeight: FontWeight.w800,
-                                  fontSize: 15,
-                                ),
-                          ),
-                        ),
-                        Text(
-                          post.subtitle,
-                          style:
-                              Theme.of(context).textTheme.bodySmall?.copyWith(
-                                    color: NoolColors.lavender,
-                                    fontSize: 12,
-                                  ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 10),
-              Text(
-                post.caption,
-                style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                      color: NoolColors.white,
-                      fontSize: 14,
-                      height: 1.35,
-                      fontWeight: FontWeight.w500,
-                    ),
-              ),
-              const SizedBox(height: 10),
-              Row(
-                children: [
-                  const NoolIcon(
-                    NoolIconData.music,
-                    size: 14,
-                    color: NoolColors.lavender,
-                  ),
-                  const SizedBox(width: 4),
-                  Expanded(
-                    child: Text(
-                      post.trackLabel,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                            color: NoolColors.lavender,
-                            fontSize: 12,
-                          ),
-                    ),
-                  ),
-                ],
-              ),
             ],
           ),
-        ),
+        ],
       ),
     );
   }

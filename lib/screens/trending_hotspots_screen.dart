@@ -1,5 +1,3 @@
-import 'dart:ui';
-
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 
@@ -131,85 +129,117 @@ class _TrendingHotspotsScreenState extends State<TrendingHotspotsScreen> {
           color: NoolColors.acid,
           backgroundColor: NoolColors.night,
           onRefresh: _load,
-          child: ListView(
+          child: CustomScrollView(
             physics: const AlwaysScrollableScrollPhysics(),
-            padding: EdgeInsets.fromLTRB(20, 24, 20, bottomPad),
-            children: [
-              NoolPulse(
-                min: 0.98,
-                max: 1.02,
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    const NoolLogoMark(size: 36, border: true, shadow: true),
-                    const SizedBox(width: 10),
-                    Text(
-                      'NOOL',
-                      style: GoogleFonts.syne(
-                        color: NoolColors.acid,
-                        fontWeight: FontWeight.w800,
-                        fontSize: 28,
-                        letterSpacing: -0.5,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(height: 10),
-              Text(
-                'KAMPÜSTE ŞU AN\nNOOLUYOR?',
-                style: GoogleFonts.syne(
-                  color: NoolColors.white,
-                  fontWeight: FontWeight.w800,
-                  fontSize: 28,
-                  height: 1.05,
-                  letterSpacing: -0.8,
-                ),
-              ),
-              const SizedBox(height: 10),
-              Text(
-                '5 km içindeki aktif drop kümeleri — en sıcak pinler üstte.',
-                style: GoogleFonts.syne(
-                  color: NoolColors.lavender,
-                  fontWeight: FontWeight.w500,
-                  fontSize: 13,
-                  height: 1.35,
-                ),
-              ),
-              const SizedBox(height: 22),
-              if (_loading)
-                const Padding(
-                  padding: EdgeInsets.only(top: 36),
-                  child: Center(
-                    child: Column(
-                      children: [
-                        NoolLottieView.fire(width: 96, height: 96),
-                        SizedBox(height: 8),
-                        NoolLottieView.loading(
-                          width: 56,
-                          height: 56,
-                          compact: true,
+            slivers: [
+              SliverPadding(
+                padding: const EdgeInsets.fromLTRB(20, 24, 20, 0),
+                sliver: SliverToBoxAdapter(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      NoolPulse(
+                        min: 0.98,
+                        max: 1.02,
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const NoolLogoMark(
+                              size: 36,
+                              border: true,
+                              shadow: true,
+                            ),
+                            const SizedBox(width: 10),
+                            Text(
+                              'NOOL',
+                              style: GoogleFonts.syne(
+                                color: NoolColors.acid,
+                                fontWeight: FontWeight.w800,
+                                fontSize: 28,
+                                letterSpacing: -0.5,
+                              ),
+                            ),
+                          ],
                         ),
-                      ],
+                      ),
+                      const SizedBox(height: 10),
+                      Text(
+                        'KAMPÜSTE ŞU AN\nNOOLUYOR?',
+                        style: GoogleFonts.syne(
+                          color: NoolColors.white,
+                          fontWeight: FontWeight.w800,
+                          fontSize: 28,
+                          height: 1.05,
+                          letterSpacing: -0.8,
+                        ),
+                      ),
+                      const SizedBox(height: 10),
+                      Text(
+                        '5 km içindeki aktif drop kümeleri — en sıcak pinler üstte.',
+                        style: GoogleFonts.syne(
+                          color: NoolColors.lavender,
+                          fontWeight: FontWeight.w500,
+                          fontSize: 13,
+                          height: 1.35,
+                        ),
+                      ),
+                      const SizedBox(height: 22),
+                    ],
+                  ),
+                ),
+              ),
+              if (_loading)
+                const SliverToBoxAdapter(
+                  child: Padding(
+                    padding: EdgeInsets.only(top: 36),
+                    child: Center(
+                      child: Column(
+                        children: [
+                          NoolLottieView.fire(width: 96, height: 96),
+                          SizedBox(height: 8),
+                          NoolLottieView.loading(
+                            width: 56,
+                            height: 56,
+                            compact: true,
+                          ),
+                        ],
+                      ),
                     ),
                   ),
                 )
               else if (_error != null)
-                _BrutalErrorCard(message: _error!, onRetry: _load)
+                SliverPadding(
+                  padding: EdgeInsets.fromLTRB(20, 0, 20, bottomPad),
+                  sliver: SliverToBoxAdapter(
+                    child: _BrutalErrorCard(message: _error!, onRetry: _load),
+                  ),
+                )
               else if (_hotspots.isEmpty)
-                _BrutalErrorCard(
-                  message:
-                      'Bağlantı koptu, kampüsteki kaos dindi...\nHenüz kimse drop bırakmamış.',
-                  onRetry: _load,
+                SliverPadding(
+                  padding: EdgeInsets.fromLTRB(20, 0, 20, bottomPad),
+                  sliver: SliverToBoxAdapter(
+                    child: _BrutalErrorCard(
+                      message:
+                          'Bağlantı koptu, kampüsteki kaos dindi...\nHenüz kimse drop bırakmamış.',
+                      onRetry: _load,
+                    ),
+                  ),
                 )
               else
-                for (final spot in _hotspots) ...[
-                  _HotspotCard(
-                    spot: spot,
-                    onTap: () => widget.onHotspotSelected?.call(spot),
+                SliverPadding(
+                  padding: EdgeInsets.fromLTRB(20, 0, 20, bottomPad),
+                  sliver: SliverList.separated(
+                    itemCount: _hotspots.length,
+                    separatorBuilder: (_, __) => const SizedBox(height: 12),
+                    itemBuilder: (context, index) {
+                      final spot = _hotspots[index];
+                      return _HotspotCard(
+                        spot: spot,
+                        onTap: () => widget.onHotspotSelected?.call(spot),
+                      );
+                    },
                   ),
-                  const SizedBox(height: 12),
-                ],
+                ),
             ],
           ),
         ),
@@ -229,77 +259,71 @@ class _HotspotCard extends StatelessWidget {
     return BrutalPressable(
       offset: const Offset(3, 3),
       onTap: onTap,
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(2),
-        child: BackdropFilter(
-          filter: ImageFilter.blur(sigmaX: 14, sigmaY: 14),
-          child: Container(
-            padding: const EdgeInsets.fromLTRB(12, 14, 12, 14),
-            decoration: BoxDecoration(
-              color: Colors.black.withOpacity(0.42),
-              borderRadius: BorderRadius.circular(2),
-              border: Border.all(color: NoolColors.ink, width: 3),
+      child: Container(
+        padding: const EdgeInsets.fromLTRB(12, 14, 12, 14),
+        decoration: BoxDecoration(
+          color: const Color(0xD90D0A1C),
+          borderRadius: BorderRadius.circular(2),
+          border: Border.all(color: NoolColors.ink, width: 3),
+        ),
+        child: Row(
+          children: [
+            SizedBox(
+              width: 88,
+              child: Text(
+                spot.distanceLabel,
+                style: GoogleFonts.syne(
+                  color: NoolColors.lavender,
+                  fontWeight: FontWeight.w700,
+                  fontSize: 12,
+                  height: 1.25,
+                ),
+              ),
             ),
-            child: Row(
-              children: [
-                SizedBox(
-                  width: 88,
-                  child: Text(
-                    spot.distanceLabel,
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    spot.name.toUpperCase(),
+                    style: GoogleFonts.syne(
+                      color: NoolColors.white,
+                      fontWeight: FontWeight.w800,
+                      fontSize: 15,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    'Dokun → sadece buradaki drop’lar',
                     style: GoogleFonts.syne(
                       color: NoolColors.lavender,
-                      fontWeight: FontWeight.w700,
-                      fontSize: 12,
-                      height: 1.25,
+                      fontSize: 11,
+                      fontWeight: FontWeight.w500,
                     ),
                   ),
-                ),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        spot.name.toUpperCase(),
-                        style: GoogleFonts.syne(
-                          color: NoolColors.white,
-                          fontWeight: FontWeight.w800,
-                          fontSize: 15,
-                        ),
-                      ),
-                      const SizedBox(height: 4),
-                      Text(
-                        'Dokun → sadece buradaki drop’lar',
-                        style: GoogleFonts.syne(
-                          color: NoolColors.lavender,
-                          fontSize: 11,
-                          fontWeight: FontWeight.w500,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 10,
-                    vertical: 8,
-                  ),
-                  decoration: BoxDecoration(
-                    color: NoolColors.acid,
-                    border: Border.all(color: NoolColors.ink, width: 2.5),
-                  ),
-                  child: Text(
-                    spot.dropsLabel,
-                    style: GoogleFonts.syne(
-                      color: NoolColors.ink,
-                      fontWeight: FontWeight.w800,
-                      fontSize: 12,
-                    ),
-                  ),
-                ),
-              ],
+                ],
+              ),
             ),
-          ),
+            const SizedBox(width: 8),
+            Container(
+              padding: const EdgeInsets.symmetric(
+                horizontal: 10,
+                vertical: 8,
+              ),
+              decoration: BoxDecoration(
+                color: NoolColors.acid,
+                border: Border.all(color: NoolColors.ink, width: 2.5),
+              ),
+              child: Text(
+                spot.dropsLabel,
+                style: GoogleFonts.syne(
+                  color: NoolColors.ink,
+                  fontWeight: FontWeight.w800,
+                  fontSize: 12,
+                ),
+              ),
+            ),
+          ],
         ),
       ),
     );

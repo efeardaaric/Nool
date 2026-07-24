@@ -31,12 +31,13 @@ class UserProfile {
     String? username,
     String? bio,
     String? avatarUrl,
+    bool clearAvatar = false,
   }) {
     return UserProfile(
       id: id,
       username: username ?? this.username,
       bio: bio ?? this.bio,
-      avatarUrl: avatarUrl ?? this.avatarUrl,
+      avatarUrl: clearAvatar ? null : (avatarUrl ?? this.avatarUrl),
       createdAt: createdAt,
     );
   }

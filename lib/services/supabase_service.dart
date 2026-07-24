@@ -58,11 +58,17 @@ class SupabaseService {
       return;
     }
 
-    await Supabase.initialize(
-      url: SupabaseConfig.url,
-      publishableKey: SupabaseConfig.publishableKey,
-    );
-    _initialized = true;
+    try {
+      await Supabase.initialize(
+        url: SupabaseConfig.url,
+        publishableKey: SupabaseConfig.publishableKey,
+      );
+      _initialized = true;
+      debugPrint('SupabaseService: hazır (${SupabaseConfig.url})');
+    } catch (e, st) {
+      debugPrint('SupabaseService.initialize başarısız: $e\n$st');
+      rethrow;
+    }
   }
 
   /// PostGIS RPC: konuma göre skor sıralı yakındaki videolar.
@@ -278,6 +284,21 @@ class SupabaseService {
     final anchor = (now ?? DateTime.now()).toUtc();
     final age = anchor.difference(createdAt.toUtc());
     return !age.isNegative && age <= SupabaseConfig.videoTtl;
+  }
+
+  /// Süresi dolmuş satır + storage temizliği (010 migration RPC).
+  /// Hata olursa sessizce yutulur — feed’i bloklamaz.
+  Future<int> purgeExpiredVideosBestEffort() async {
+    if (!isReady) return 0;
+    try {
+      final result = await client.rpc('purge_expired_videos');
+      if (result is int) return result;
+      if (result is num) return result.toInt();
+      return int.tryParse('$result') ?? 0;
+    } catch (e, st) {
+      debugPrint('SupabaseService.purgeExpiredVideosBestEffort: $e\n$st');
+      return 0;
+    }
   }
 
   /// Yerel skor: vibe / (mesafe × zaman_saat). Sıfır bölmeyi engeller.

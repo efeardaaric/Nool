@@ -1,10 +1,11 @@
 import 'package:flutter/material.dart';
 
+import '../services/auth_service.dart';
 import '../services/location_service.dart';
-import '../services/onboarding_service.dart';
 import '../theme/app_theme.dart';
 import '../theme/colors.dart';
-import 'layout_manager.dart';
+import 'location_gate_screen.dart';
+import 'sign_in_screen.dart';
 import 'splash_screen.dart';
 
 /// Konum izni reddedilince — asit yeşili uyarı kompozisyonu.
@@ -46,21 +47,18 @@ class _PermissionDeniedScreenState extends State<PermissionDeniedScreen>
     if (!mounted) return;
 
     if (granted) {
-      final username = await _resolveUsername();
       if (!mounted) return;
       Navigator.of(context).pushReplacement(
         MaterialPageRoute<void>(
-          builder: (_) => LayoutManager(username: username),
+          builder: (_) => AuthService().isSignedIn
+              ? const LocationGateScreen()
+              : const SignInScreen(gateMode: true),
         ),
       );
       return;
     }
 
     await LocationService.openAppSettings();
-  }
-
-  Future<String> _resolveUsername() async {
-    return await OnboardingService.getUsername() ?? '@anon_kayip_kaos';
   }
 
   @override

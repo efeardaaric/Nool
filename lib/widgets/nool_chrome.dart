@@ -187,12 +187,12 @@ class NoolGlassPanel extends StatelessWidget {
 /// Sekme / sayfa geçişi — fade + hafif slide.
 Route<T> noolRoute<T>({
   required Widget page,
-  Duration duration = const Duration(milliseconds: 380),
-  Offset begin = const Offset(0, 0.05),
+  Duration duration = const Duration(milliseconds: 280),
+  Offset begin = const Offset(0, 0.04),
 }) {
   return PageRouteBuilder<T>(
     transitionDuration: duration,
-    reverseTransitionDuration: const Duration(milliseconds: 280),
+    reverseTransitionDuration: const Duration(milliseconds: 220),
     pageBuilder: (_, __, ___) => page,
     transitionsBuilder: (_, anim, __, child) {
       final curved = CurvedAnimation(

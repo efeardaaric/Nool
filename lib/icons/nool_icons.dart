@@ -33,6 +33,7 @@ enum NoolIconData {
   more,
   stop,
   record,
+  gallery,
 }
 
 extension NoolIconDataX on NoolIconData {
@@ -89,6 +90,8 @@ extension NoolIconDataX on NoolIconData {
         return '$root/stop.svg';
       case NoolIconData.record:
         return '$root/record.svg';
+      case NoolIconData.gallery:
+        return '$root/gallery.svg';
     }
   }
 }
@@ -117,11 +120,14 @@ class NoolIcon extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // Outline SVG'ler stroke="#000" kullanır; currentColor yetmez.
+    // srcIn ile tüm yollar [color]'a boyanır (nav'da görünürlük için şart).
     final picture = SvgPicture.asset(
       icon.assetPath,
       width: size,
       height: size,
       theme: SvgTheme(currentColor: color),
+      colorFilter: ColorFilter.mode(color, BlendMode.srcIn),
       fit: BoxFit.contain,
     );
 
@@ -138,6 +144,7 @@ class NoolIcon extends StatelessWidget {
             width: size,
             height: size,
             theme: const SvgTheme(currentColor: NoolColors.ink),
+            colorFilter: const ColorFilter.mode(NoolColors.ink, BlendMode.srcIn),
             fit: BoxFit.contain,
           ),
         ),

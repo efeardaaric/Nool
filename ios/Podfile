@@ -1,6 +1,6 @@
 # Nool iOS — CocoaPods
-# Build with the latest Xcode / iOS SDK (Apple App Store: Xcode 26 / iOS 26 SDK as of Apr 2026).
-# Deployment target stays at iOS 15+ so pods and the Runner app stay compatible.
+# Build with the latest Xcode / iOS SDK available on the Mac.
+# Deployment target stays at iOS 15+ for camera / geolocator / supabase_flutter.
 
 platform :ios, '15.0'
 
@@ -44,18 +44,17 @@ post_install do |installer|
   installer.pods_project.targets.each do |target|
     flutter_additional_ios_build_settings(target)
     target.build_configurations.each do |config|
-      # Minimum deployment: iOS 15 (Apple / Flutter plugins; not the SDK version used to build)
       config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '15.0'
 
-      # Modern Xcode / iOS SDK build settings (Xcode 26 / iOS 26 SDK toolchain)
+      # Bitcode is obsolete (Xcode 14+); keep explicitly off for all pods
       config.build_settings['ENABLE_BITCODE'] = 'NO'
 
-      # arm64 device + simulator compatibility with current Apple Silicon / Xcode SDKs
+      # Drop 32-bit simulator arch only; Apple Silicon simulators need arm64
       config.build_settings['EXCLUDED_ARCHS[sdk=iphonesimulator*]'] = 'i386'
 
-      # Prefer the active SDK from the installed Xcode (iOS 26 SDK when Xcode 26 is selected)
-      if config.build_settings['SDKROOT'].nil? || config.build_settings['SDKROOT'].to_s.empty?
-        config.build_settings['SDKROOT'] = 'iphoneos'
+      # Faster Debug pod compiles
+      if config.name == 'Debug'
+        config.build_settings['ONLY_ACTIVE_ARCH'] = 'YES'
       end
     end
   end

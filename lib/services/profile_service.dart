@@ -105,6 +105,63 @@ class ProfileService {
     }
   }
 
+  static const _videoSelect =
+      'id, video_url, username, caption, subtitle, track_label, '
+      'vibe_count, comment_count, created_at, device_id';
+
+  String get _ttlSinceIso => DateTime.now()
+      .toUtc()
+      .subtract(SupabaseConfig.videoTtl)
+      .toIso8601String();
+
+  /// device_id + username sonuçlarını birleştirip id’ye göre tekilleştirir.
+  /// Sunucu RLS + created_at filtresi + istemci TTL ile 24s penceresi korunur.
+  Future<List<dynamic>> _fetchMergedVideoRows({
+    String? deviceId,
+    Set<String> usernames = const {},
+  }) async {
+    final byId = <String, Map<String, dynamic>>{};
+    final since = _ttlSinceIso;
+
+    void ingest(List<dynamic> rows) {
+      for (final row in rows) {
+        if (row is! Map) continue;
+        final map = Map<String, dynamic>.from(row);
+        final id = '${map['id'] ?? ''}';
+        if (id.isEmpty) continue;
+        byId[id] = map;
+      }
+    }
+
+    if (deviceId != null && deviceId.isNotEmpty) {
+      final rows = await _client
+          .from('videos')
+          .select(_videoSelect)
+          .eq('device_id', deviceId)
+          .gte('created_at', since)
+          .order('created_at', ascending: false);
+      ingest(List<dynamic>.from(rows as List));
+    }
+
+    if (usernames.isNotEmpty) {
+      final rows = await _client
+          .from('videos')
+          .select(_videoSelect)
+          .inFilter('username', usernames.toList())
+          .gte('created_at', since)
+          .order('created_at', ascending: false);
+      ingest(List<dynamic>.from(rows as List));
+    }
+
+    final merged = byId.values.toList();
+    merged.sort((a, b) {
+      final aAt = DateTime.tryParse('${a['created_at']}') ?? DateTime(1970);
+      final bAt = DateTime.tryParse('${b['created_at']}') ?? DateTime(1970);
+      return bAt.compareTo(aAt);
+    });
+    return merged;
+  }
+
   /// Kullanıcının aktif (TTL) videoları — username / device eşleşmesi.
   Future<List<VibePost>> getUploadedVideosForUser({
     String? username,
@@ -120,30 +177,10 @@ class ProfileService {
         usernames.add(raw.startsWith('@') ? raw.substring(1) : '@$raw');
       }
 
-      List<dynamic> rows = const [];
-
-      if (deviceId != null && deviceId.isNotEmpty) {
-        rows = await _client
-            .from('videos')
-            .select(
-              'id, video_url, username, caption, subtitle, track_label, '
-              'vibe_count, comment_count, created_at, device_id',
-            )
-            .eq('device_id', deviceId)
-            .order('created_at', ascending: false);
-      }
-
-      if (rows.isEmpty && usernames.isNotEmpty) {
-        rows = await _client
-            .from('videos')
-            .select(
-              'id, video_url, username, caption, subtitle, track_label, '
-              'vibe_count, comment_count, created_at, device_id',
-            )
-            .inFilter('username', usernames.toList())
-            .order('created_at', ascending: false);
-      }
-
+      final rows = await _fetchMergedVideoRows(
+        deviceId: deviceId,
+        usernames: usernames,
+      );
       return _mapVideoRows(rows);
     } catch (e, st) {
       debugPrint('ProfileService.getUploadedVideosForUser: $e\n$st');
@@ -164,30 +201,31 @@ class ProfileService {
   }
 
   List<VibePost> _mapVideoRows(List<dynamic> rows) {
-    final posts = rows
-        .whereType<Map<Object?, Object?>>()
-        .map((e) {
-          final map = Map<String, dynamic>.from(e);
-          map.putIfAbsent('distance_m', () => null);
-          map.putIfAbsent('score', () => null);
-          final post = VibePost.fromRpc(map);
-          return VibePost(
-            id: post.id,
-            videoUrl: post.videoUrl,
-            username: post.username,
-            caption: post.caption,
-            distanceLabel: 'drop',
-            subtitle: post.subtitle,
-            trackLabel: post.trackLabel,
-            vibeCountLabel: post.vibeCountLabel,
-            commentCountLabel: post.commentCountLabel,
-            avatarColor: post.avatarColor,
-            vibeCount: post.vibeCount,
-            commentCount: post.commentCount,
-            createdAt: post.createdAt,
-          );
-        })
-        .toList();
+    final posts = <VibePost>[];
+    for (final row in rows) {
+      if (row is! Map) continue;
+      final map = Map<String, dynamic>.from(row);
+      map.putIfAbsent('distance_m', () => null);
+      map.putIfAbsent('score', () => null);
+      final post = VibePost.fromRpc(map);
+      posts.add(
+        VibePost(
+          id: post.id,
+          videoUrl: post.videoUrl,
+          username: post.username,
+          caption: post.caption,
+          distanceLabel: 'drop',
+          subtitle: post.subtitle,
+          trackLabel: post.trackLabel,
+          vibeCountLabel: post.vibeCountLabel,
+          commentCountLabel: post.commentCountLabel,
+          avatarColor: post.avatarColor,
+          vibeCount: post.vibeCount,
+          commentCount: post.commentCount,
+          createdAt: post.createdAt,
+        ),
+      );
+    }
     return SupabaseService.instance.filterFreshVideos(posts);
   }
 
@@ -218,11 +256,12 @@ class ProfileService {
     }
   }
 
-  /// Profil güncelle — opsiyonel avatar Storage'a yüklenir.
+  /// Profil güncelle — opsiyonel avatar yükle / kaldır.
   Future<UserProfile> updateProfile({
     required String username,
     required String bio,
     String? avatarPath,
+    bool removeAvatar = false,
   }) async {
     _assertSignedIn();
     final uid = _uid!;
@@ -235,16 +274,25 @@ class ProfileService {
     if (trimmedBio.length > 150) {
       throw ArgumentError('Bio en fazla 150 karakter olabilir.');
     }
+    if (removeAvatar && avatarPath != null && avatarPath.isNotEmpty) {
+      throw ArgumentError('Avatar yükleme ve kaldırma aynı anda olamaz.');
+    }
 
     try {
       String? avatarUrl;
-      if (avatarPath != null && avatarPath.isNotEmpty) {
+      var clearAvatar = false;
+
+      if (removeAvatar) {
+        await _deleteOwnAvatars(uid);
+        clearAvatar = true;
+      } else if (avatarPath != null && avatarPath.isNotEmpty) {
         avatarUrl = await _uploadAvatar(uid: uid, localPath: avatarPath);
       }
 
       final payload = <String, dynamic>{
         'username': trimmedUser,
         'bio': trimmedBio,
+        if (clearAvatar) 'avatar_url': null,
         if (avatarUrl != null) 'avatar_url': avatarUrl,
       };
 
@@ -294,12 +342,34 @@ class ProfileService {
         .getPublicUrl(objectPath);
   }
 
+  /// Kullanıcının `avatars/{uid}/` altındaki dosyalarını siler.
+  Future<void> _deleteOwnAvatars(String uid) async {
+    try {
+      final listed = await _client.storage
+          .from(SupabaseConfig.avatarsBucket)
+          .list(path: uid);
+      if (listed.isEmpty) return;
+      final paths = listed
+          .map((f) => '$uid/${f.name}')
+          .where((p) => p.length > uid.length + 1)
+          .toList(growable: false);
+      if (paths.isEmpty) return;
+      await _client.storage.from(SupabaseConfig.avatarsBucket).remove(paths);
+    } catch (e, st) {
+      debugPrint('ProfileService._deleteOwnAvatars: $e\n$st');
+      // Profil URL temizliği yine de devam etsin.
+    }
+  }
+
   /// GDPR: profiles DELETE → SQL tetikleyici auth.users siler; oturum temizlenir.
   Future<void> deleteAccount() async {
     _assertSignedIn();
     final uid = _uid!;
 
     try {
+      // Avatar storage orphan’larını mümkün olduğunca önce temizle.
+      await _deleteOwnAvatars(uid);
+
       try {
         await _client.rpc('delete_own_account');
       } catch (e) {
@@ -333,64 +403,254 @@ class ProfileService {
         if (profile != null) profile.username,
         if (profile != null && !profile.username.startsWith('@'))
           '@${profile.username}',
+        if (profile != null && profile.username.startsWith('@'))
+          profile.username.substring(1),
         if (localUsername != null) localUsername,
+        if (localUsername != null && !localUsername.startsWith('@'))
+          '@$localUsername',
       };
 
-      List<dynamic> rows = const [];
+      final rows = await _fetchMergedVideoRows(
+        deviceId: deviceId,
+        usernames: usernames,
+      );
 
-      if (deviceId != null && deviceId.isNotEmpty) {
-        rows = await _client
-            .from('videos')
-            .select(
-              'id, video_url, username, caption, subtitle, track_label, '
-              'vibe_count, comment_count, created_at, device_id',
-            )
-            .eq('device_id', deviceId)
-            .order('created_at', ascending: false);
+      final posts = <VibePost>[];
+      for (final row in rows) {
+        if (row is! Map) continue;
+        final map = Map<String, dynamic>.from(row);
+        map.putIfAbsent('distance_m', () => null);
+        map.putIfAbsent('score', () => null);
+        final post = VibePost.fromRpc(map);
+        posts.add(
+          VibePost(
+            id: post.id,
+            videoUrl: post.videoUrl,
+            username: post.username,
+            caption: post.caption,
+            distanceLabel: 'senin drop',
+            subtitle: post.subtitle,
+            trackLabel: post.trackLabel,
+            vibeCountLabel: post.vibeCountLabel,
+            commentCountLabel: post.commentCountLabel,
+            avatarColor: post.avatarColor,
+            vibeCount: post.vibeCount,
+            commentCount: post.commentCount,
+            createdAt: post.createdAt,
+          ),
+        );
       }
-
-      // device_id eşleşmezse username ile dene (eski drop'lar).
-      if (rows.isEmpty && usernames.isNotEmpty) {
-        rows = await _client
-            .from('videos')
-            .select(
-              'id, video_url, username, caption, subtitle, track_label, '
-              'vibe_count, comment_count, created_at, device_id',
-            )
-            .inFilter('username', usernames.toList())
-            .order('created_at', ascending: false);
-      }
-
-      final posts = rows
-          .whereType<Map<Object?, Object?>>()
-          .map((e) {
-            final map = Map<String, dynamic>.from(e);
-            map.putIfAbsent('distance_m', () => null);
-            map.putIfAbsent('score', () => null);
-            final post = VibePost.fromRpc(map);
-            return VibePost(
-              id: post.id,
-              videoUrl: post.videoUrl,
-              username: post.username,
-              caption: post.caption,
-              distanceLabel: 'senin drop',
-              subtitle: post.subtitle,
-              trackLabel: post.trackLabel,
-              vibeCountLabel: post.vibeCountLabel,
-              commentCountLabel: post.commentCountLabel,
-              avatarColor: post.avatarColor,
-              vibeCount: post.vibeCount,
-              commentCount: post.commentCount,
-              createdAt: post.createdAt,
-            );
-          })
-          .toList();
 
       return SupabaseService.instance.filterFreshVideos(posts);
     } catch (e, st) {
       debugPrint('ProfileService.getMyUploadedVideos: $e\n$st');
       rethrow;
     }
+  }
+
+  /// Ben ↔ [otherUserId] engelli mi? (her iki yön).
+  Future<bool> areUsersBlocked(String otherUserId) async {
+    _assertSignedIn();
+    final uid = _uid!;
+    if (otherUserId == uid) return false;
+
+    try {
+      final result = await _client.rpc(
+        'are_users_blocked',
+        params: {'p_other_user_id': otherUserId},
+      );
+      return result == true;
+    } catch (e, st) {
+      debugPrint('ProfileService.areUsersBlocked rpc fallback → select: $e\n$st');
+      try {
+        final rows = await _client
+            .from('blocks')
+            .select('id')
+            .or(
+              'and(blocker_id.eq.$uid,blocked_id.eq.$otherUserId),'
+              'and(blocker_id.eq.$otherUserId,blocked_id.eq.$uid)',
+            )
+            .limit(1);
+        return (rows as List).isNotEmpty;
+      } catch (e2, st2) {
+        debugPrint('ProfileService.areUsersBlocked: $e2\n$st2');
+        rethrow;
+      }
+    }
+  }
+
+  /// Yalnızca benim engellediğim kullanıcı mı?
+  Future<bool> haveIBlocked(String otherUserId) async {
+    _assertSignedIn();
+    final uid = _uid!;
+    if (otherUserId == uid) return false;
+
+    try {
+      final row = await _client
+          .from('blocks')
+          .select('id')
+          .eq('blocker_id', uid)
+          .eq('blocked_id', otherUserId)
+          .maybeSingle();
+      return row != null;
+    } catch (e, st) {
+      debugPrint('ProfileService.haveIBlocked: $e\n$st');
+      rethrow;
+    }
+  }
+
+  Future<void> blockUser(String otherUserId) async {
+    _assertSignedIn();
+    final uid = _uid!;
+    if (otherUserId == uid) {
+      throw ArgumentError('Kendini engelleyemezsin.');
+    }
+
+    try {
+      try {
+        await _client.rpc(
+          'block_user',
+          params: {'p_blocked_id': otherUserId},
+        );
+        return;
+      } catch (rpcErr) {
+        debugPrint(
+          'ProfileService.blockUser rpc fallback → insert: $rpcErr',
+        );
+      }
+
+      await _client.from('blocks').upsert({
+        'blocker_id': uid,
+        'blocked_id': otherUserId,
+      });
+
+      // Squad bağını kopar (RPC yoksa).
+      try {
+        await _client
+            .from('squads')
+            .delete()
+            .or(
+              'and(sender_id.eq.$uid,receiver_id.eq.$otherUserId),'
+              'and(sender_id.eq.$otherUserId,receiver_id.eq.$uid)',
+            );
+      } catch (_) {}
+    } catch (e, st) {
+      debugPrint('ProfileService.blockUser: $e\n$st');
+      rethrow;
+    }
+  }
+
+  Future<void> unblockUser(String otherUserId) async {
+    _assertSignedIn();
+    final uid = _uid!;
+
+    try {
+      try {
+        await _client.rpc(
+          'unblock_user',
+          params: {'p_blocked_id': otherUserId},
+        );
+        return;
+      } catch (rpcErr) {
+        debugPrint(
+          'ProfileService.unblockUser rpc fallback → delete: $rpcErr',
+        );
+      }
+
+      await _client
+          .from('blocks')
+          .delete()
+          .eq('blocker_id', uid)
+          .eq('blocked_id', otherUserId);
+    } catch (e, st) {
+      debugPrint('ProfileService.unblockUser: $e\n$st');
+      rethrow;
+    }
+  }
+
+  /// Engellediğim kullanıcılar (profil + tarih).
+  Future<List<UserProfile>> listBlockedUsers() async {
+    _assertSignedIn();
+    final uid = _uid!;
+
+    try {
+      try {
+        final rows = await _client.rpc('list_my_blocks');
+        return (rows as List<dynamic>)
+            .whereType<Map<Object?, Object?>>()
+            .map((e) {
+              final map = Map<String, dynamic>.from(e);
+              return UserProfile(
+                id: map['blocked_id'].toString(),
+                username: (map['username'] as String?) ?? '@anon',
+                bio: (map['bio'] as String?) ?? '',
+                avatarUrl: map['avatar_url'] as String?,
+                createdAt: map['created_at'] == null
+                    ? null
+                    : DateTime.tryParse(map['created_at'].toString())?.toUtc(),
+              );
+            })
+            .toList(growable: false);
+      } catch (rpcErr) {
+        debugPrint(
+          'ProfileService.listBlockedUsers rpc fallback → join: $rpcErr',
+        );
+      }
+
+      final rows = await _client
+          .from('blocks')
+          .select('blocked_id, created_at, blocked:profiles!blocks_blocked_id_fkey(*)')
+          .eq('blocker_id', uid)
+          .order('created_at', ascending: false);
+
+      final out = <UserProfile>[];
+      for (final raw in rows as List<dynamic>) {
+        final map = Map<String, dynamic>.from(raw as Map);
+        final blocked = map['blocked'];
+        if (blocked is Map) {
+          out.add(UserProfile.fromRow(Map<String, dynamic>.from(blocked)));
+        } else {
+          final id = map['blocked_id']?.toString();
+          if (id == null) continue;
+          final p = await fetchProfile(userId: id);
+          if (p != null) out.add(p);
+        }
+      }
+      return out;
+    } catch (e, st) {
+      debugPrint('ProfileService.listBlockedUsers: $e\n$st');
+      rethrow;
+    }
+  }
+
+  /// Engellenen kullanıcı adları (yorum filtreleme — @ varyantları dahil).
+  Future<Set<String>> blockedUsernameKeys() async {
+    if (_uid == null || !SupabaseService.instance.isReady) {
+      return const {};
+    }
+    try {
+      final blocked = await listBlockedUsers();
+      final keys = <String>{};
+      for (final p in blocked) {
+        final raw = p.username.trim().toLowerCase();
+        if (raw.isEmpty) continue;
+        keys.add(raw);
+        keys.add(raw.startsWith('@') ? raw.substring(1) : '@$raw');
+      }
+      return keys;
+    } catch (e, st) {
+      debugPrint('ProfileService.blockedUsernameKeys: $e\n$st');
+      return const {};
+    }
+  }
+
+  static bool usernameMatchesBlocked(String username, Set<String> blockedKeys) {
+    if (blockedKeys.isEmpty) return false;
+    final raw = username.trim().toLowerCase();
+    if (raw.isEmpty) return false;
+    if (blockedKeys.contains(raw)) return true;
+    final alt = raw.startsWith('@') ? raw.substring(1) : '@$raw';
+    return blockedKeys.contains(alt);
   }
 
   Future<SquadEdge> sendSquadRequest(String receiverId) async {
@@ -400,7 +660,27 @@ class ProfileService {
       throw ArgumentError('Kendine squad isteği gönderemezsin.');
     }
 
+    if (await areUsersBlocked(receiverId)) {
+      throw StateError('Bu kullanıcıyla etkileşim engellendi.');
+    }
+
     try {
+      // RPC: rejected sonrası yeniden istek + tek yön unique.
+      try {
+        final row = await _client.rpc(
+          'send_squad_request',
+          params: {'p_receiver_id': receiverId},
+        );
+        return SquadEdge.fromRow(
+          Map<String, dynamic>.from(row as Map),
+          viewerId: uid,
+        );
+      } catch (rpcErr) {
+        debugPrint(
+          'ProfileService.sendSquadRequest rpc fallback → insert: $rpcErr',
+        );
+      }
+
       final row = await _client
           .from('squads')
           .insert({
@@ -435,6 +715,114 @@ class ProfileService {
     } catch (e, st) {
       debugPrint('ProfileService.acceptSquadRequest: $e\n$st');
       rethrow;
+    }
+  }
+
+  Future<SquadEdge> rejectSquadRequest(String requestId) async {
+    _assertSignedIn();
+    final uid = _uid!;
+
+    try {
+      try {
+        final row = await _client.rpc(
+          'reject_squad_request',
+          params: {'p_request_id': requestId},
+        );
+        return SquadEdge.fromRow(
+          Map<String, dynamic>.from(row as Map),
+          viewerId: uid,
+        );
+      } catch (rpcErr) {
+        debugPrint(
+          'ProfileService.rejectSquadRequest rpc fallback → update: $rpcErr',
+        );
+      }
+
+      final row = await _client
+          .from('squads')
+          .update({'status': 'rejected'})
+          .eq('id', requestId)
+          .eq('receiver_id', uid)
+          .select()
+          .single();
+
+      return SquadEdge.fromRow(Map<String, dynamic>.from(row), viewerId: uid);
+    } catch (e, st) {
+      debugPrint('ProfileService.rejectSquadRequest: $e\n$st');
+      rethrow;
+    }
+  }
+
+  /// Gelen bekleyen squad istekleri.
+  Future<List<SquadEdge>> getPendingSquadRequests() async {
+    _assertSignedIn();
+    final uid = _uid!;
+
+    try {
+      final rows = await _client
+          .from('squads')
+          .select(
+            'id, sender_id, receiver_id, status, created_at, '
+            'sender:profiles!squads_sender_id_fkey(*)',
+          )
+          .eq('receiver_id', uid)
+          .eq('status', 'pending')
+          .order('created_at', ascending: false);
+
+      return (rows as List<dynamic>)
+          .whereType<Map<Object?, Object?>>()
+          .map(
+            (e) => SquadEdge.fromRow(
+              Map<String, dynamic>.from(e),
+              viewerId: uid,
+            ),
+          )
+          .toList(growable: false);
+    } catch (e, st) {
+      debugPrint('ProfileService.getPendingSquadRequests: $e\n$st');
+      try {
+        final rows = await _client
+            .from('squads')
+            .select()
+            .eq('receiver_id', uid)
+            .eq('status', 'pending')
+            .order('created_at', ascending: false);
+
+        final edges = <SquadEdge>[];
+        for (final raw in rows as List<dynamic>) {
+          final map = Map<String, dynamic>.from(raw as Map);
+          final senderId = map['sender_id']?.toString();
+          UserProfile? other;
+          if (senderId != null) {
+            final p = await _client
+                .from('profiles')
+                .select()
+                .eq('id', senderId)
+                .maybeSingle();
+            if (p != null) {
+              other = UserProfile.fromRow(Map<String, dynamic>.from(p));
+            }
+          }
+          edges.add(
+            SquadEdge(
+              id: map['id'].toString(),
+              senderId: map['sender_id'].toString(),
+              receiverId: map['receiver_id'].toString(),
+              status: 'pending',
+              createdAt: map['created_at'] == null
+                  ? null
+                  : DateTime.tryParse(map['created_at'].toString())?.toUtc(),
+              otherProfile: other,
+            ),
+          );
+        }
+        return edges;
+      } catch (e2, st2) {
+        debugPrint(
+          'ProfileService.getPendingSquadRequests fallback: $e2\n$st2',
+        );
+        rethrow;
+      }
     }
   }
 

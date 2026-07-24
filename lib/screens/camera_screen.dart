@@ -7,6 +7,7 @@ import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:video_player/video_player.dart';
 
 import '../icons/nool_icons.dart';
@@ -199,11 +200,16 @@ class _CameraScreenState extends State<CameraScreen>
     await previous?.dispose();
 
     final description = _cameras[index];
+    // Android’de medium daha az jank; iOS high + bgra8888 daha akıcı preview.
+    final preset =
+        Platform.isAndroid ? ResolutionPreset.medium : ResolutionPreset.high;
+    final format =
+        Platform.isIOS ? ImageFormatGroup.bgra8888 : ImageFormatGroup.yuv420;
     final controller = CameraController(
       description,
-      ResolutionPreset.high,
+      preset,
       enableAudio: true,
-      imageFormatGroup: ImageFormatGroup.jpeg,
+      imageFormatGroup: format,
     );
 
     try {
@@ -319,6 +325,80 @@ class _CameraScreenState extends State<CameraScreen>
     }
   }
 
+  Future<void> _pickFromGallery() async {
+    if (_busy || _dropping || _recording) return;
+
+    setState(() => _busy = true);
+    try {
+      final picked = await ImagePicker().pickVideo(
+        source: ImageSource.gallery,
+        maxDuration: const Duration(seconds: _maxRecordSeconds),
+      );
+      if (picked == null) {
+        if (mounted) setState(() => _busy = false);
+        return;
+      }
+
+      if (!_looksLikeVideo(picked)) {
+        if (mounted) setState(() => _busy = false);
+        _toast('Sadece video seçebilirsin.');
+        return;
+      }
+
+      final path = picked.path;
+      final probe = VideoPlayerController.file(File(path));
+      try {
+        await probe.initialize();
+        final seconds = probe.value.duration.inMilliseconds / 1000.0;
+        // Küçük tolerans: meta veri bazen 15.0x gösterir.
+        if (seconds > _maxRecordSeconds + 0.35) {
+          await probe.dispose();
+          if (!mounted) return;
+          setState(() => _busy = false);
+          _toast(
+            'Video en fazla $_maxRecordSeconds saniye olabilir. '
+            'Daha kısa bir klip seç.',
+          );
+          return;
+        }
+        await probe.dispose();
+      } catch (_) {
+        await probe.dispose();
+        if (!mounted) return;
+        setState(() => _busy = false);
+        _toast('Video okunamadı. Başka bir dosya dene.');
+        return;
+      }
+
+      // Kayıt sonrası gibi kamerayı kapat — bellek / donanım serbest.
+      final cam = _camera;
+      _camera = null;
+      try {
+        await cam?.setFlashMode(FlashMode.off);
+      } catch (_) {}
+      await cam?.dispose();
+
+      await _openPlayback(path);
+      if (!mounted) return;
+      setState(() {
+        _busy = false;
+        _flashOn = false;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _busy = false);
+      _toast('Galeriden video seçilemedi.');
+    }
+  }
+
+  bool _looksLikeVideo(XFile file) {
+    final mime = file.mimeType?.toLowerCase();
+    if (mime != null && mime.startsWith('video/')) return true;
+    final lower = file.path.toLowerCase();
+    const exts = ['.mp4', '.mov', '.m4v', '.webm', '.3gp', '.mkv', '.avi'];
+    return exts.any(lower.endsWith);
+  }
+
   Future<void> _openPlayback(String path) async {
     await _playback?.dispose();
     final player = VideoPlayerController.file(File(path));
@@ -417,7 +497,8 @@ class _CameraScreenState extends State<CameraScreen>
 
   @override
   Widget build(BuildContext context) {
-    final shellPad = widget.onExit != null ? 72.0 : 0.0;
+    // Floating nav (~76) + gap; LayoutManager bottom inset ayrı hesaplanır.
+    final shellPad = widget.onExit != null ? 100.0 : 0.0;
 
     return Scaffold(
       backgroundColor: NoolColors.night,
@@ -521,6 +602,7 @@ class _CameraScreenState extends State<CameraScreen>
                     busy: _busy,
                     onMysteryChanged: (v) => setState(() => _mysteryMode = v),
                     onRecord: _toggleRecord,
+                    onGallery: _pickFromGallery,
                   ),
                 ),
               )
@@ -817,6 +899,7 @@ class _CaptureControls extends StatelessWidget {
     required this.busy,
     required this.onMysteryChanged,
     required this.onRecord,
+    required this.onGallery,
   });
 
   final bool mysteryMode;
@@ -824,76 +907,108 @@ class _CaptureControls extends StatelessWidget {
   final bool busy;
   final ValueChanged<bool> onMysteryChanged;
   final VoidCallback onRecord;
+  final VoidCallback onGallery;
 
   @override
   Widget build(BuildContext context) {
-    final bottom = MediaQuery.paddingOf(context).bottom;
+    final canInteract = !busy && !recording;
 
     return Padding(
-      padding: EdgeInsets.fromLTRB(20, 0, 20, 24 + bottom),
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
       child: Row(
-        crossAxisAlignment: CrossAxisAlignment.end,
+        crossAxisAlignment: CrossAxisAlignment.center,
         children: [
-          Expanded(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                  decoration: BoxDecoration(
-                    color: mysteryMode
-                        ? NoolColors.acid
-                        : Colors.black.withOpacity(0.45),
-                    border: Border.all(color: NoolColors.ink, width: 3),
-                    boxShadow: const [
-                      BoxShadow(
-                        color: NoolColors.ink,
-                        offset: Offset(3, 3),
-                        blurRadius: 0,
-                      ),
-                    ],
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(
-                        Icons.blur_on_rounded,
-                        size: 18,
-                        color: mysteryMode ? NoolColors.ink : NoolColors.white,
-                      ),
-                      const SizedBox(width: 6),
-                      Text(
-                        'GİZEM',
-                        style: GoogleFonts.syne(
+          Flexible(
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: GestureDetector(
+                onTap: canInteract
+                    ? () => onMysteryChanged(!mysteryMode)
+                    : null,
+                child: Opacity(
+                  opacity: canInteract ? 1 : 0.45,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 10,
+                      vertical: 10,
+                    ),
+                    decoration: BoxDecoration(
+                      color: mysteryMode
+                          ? NoolColors.acid
+                          : Colors.black.withOpacity(0.45),
+                      border: Border.all(color: NoolColors.ink, width: 3),
+                      boxShadow: const [
+                        BoxShadow(
+                          color: NoolColors.ink,
+                          offset: Offset(3, 3),
+                          blurRadius: 0,
+                        ),
+                      ],
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          Icons.blur_on_rounded,
+                          size: 18,
                           color:
                               mysteryMode ? NoolColors.ink : NoolColors.white,
-                          fontWeight: FontWeight.w800,
-                          fontSize: 12,
                         ),
-                      ),
-                      Transform.scale(
-                        scale: 0.85,
-                        child: Switch(
-                          value: mysteryMode,
-                          activeColor: NoolColors.ink,
-                          activeTrackColor: NoolColors.acid,
-                          inactiveThumbColor: NoolColors.lavender,
-                          inactiveTrackColor: Colors.white24,
-                          onChanged: onMysteryChanged,
+                        const SizedBox(width: 6),
+                        Text(
+                          'GİZEM',
+                          style: GoogleFonts.syne(
+                            color: mysteryMode
+                                ? NoolColors.ink
+                                : NoolColors.white,
+                            fontWeight: FontWeight.w800,
+                            fontSize: 12,
+                          ),
                         ),
-                      ),
-                    ],
+                        const SizedBox(width: 8),
+                        Container(
+                          width: 34,
+                          height: 20,
+                          padding: const EdgeInsets.all(2),
+                          decoration: BoxDecoration(
+                            color: mysteryMode
+                                ? NoolColors.ink.withOpacity(0.2)
+                                : Colors.white24,
+                            borderRadius: BorderRadius.circular(99),
+                            border: Border.all(
+                              color: mysteryMode
+                                  ? NoolColors.ink
+                                  : NoolColors.lavender,
+                              width: 1.5,
+                            ),
+                          ),
+                          alignment: mysteryMode
+                              ? Alignment.centerRight
+                              : Alignment.centerLeft,
+                          child: Container(
+                            width: 14,
+                            height: 14,
+                            decoration: BoxDecoration(
+                              color: mysteryMode
+                                  ? NoolColors.ink
+                                  : NoolColors.lavender,
+                              shape: BoxShape.circle,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
                 ),
-              ],
+              ),
             ),
           ),
+          const SizedBox(width: 12),
           GestureDetector(
             onTap: busy ? null : onRecord,
             child: Container(
-              width: 78,
-              height: 78,
+              width: 72,
+              height: 72,
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
                 color: recording ? NoolColors.tangerine : NoolColors.acid,
@@ -909,11 +1024,58 @@ class _CaptureControls extends StatelessWidget {
               child: NoolIcon(
                 recording ? NoolIconData.stop : NoolIconData.record,
                 color: NoolColors.ink,
-                size: recording ? 32 : 36,
+                size: recording ? 30 : 34,
               ),
             ),
           ),
-          const Expanded(child: SizedBox()),
+          const SizedBox(width: 12),
+          Flexible(
+            child: Align(
+              alignment: Alignment.centerRight,
+              child: GestureDetector(
+                onTap: canInteract ? onGallery : null,
+                child: Opacity(
+                  opacity: canInteract ? 1 : 0.45,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 12,
+                    ),
+                    decoration: BoxDecoration(
+                      color: Colors.black.withOpacity(0.45),
+                      border: Border.all(color: NoolColors.ink, width: 3),
+                      boxShadow: const [
+                        BoxShadow(
+                          color: NoolColors.ink,
+                          offset: Offset(3, 3),
+                          blurRadius: 0,
+                        ),
+                      ],
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const NoolIcon(
+                          NoolIconData.gallery,
+                          color: NoolColors.acid,
+                          size: 20,
+                        ),
+                        const SizedBox(width: 6),
+                        Text(
+                          'GALERİ',
+                          style: GoogleFonts.syne(
+                            color: NoolColors.white,
+                            fontWeight: FontWeight.w800,
+                            fontSize: 12,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
         ],
       ),
     );

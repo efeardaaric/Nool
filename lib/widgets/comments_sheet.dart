@@ -1,13 +1,14 @@
 import 'dart:async';
-import 'dart:ui';
 
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:uuid/uuid.dart';
 
 import '../models/comment_item.dart';
+import '../services/auth_service.dart';
 import '../services/onboarding_service.dart';
 import '../services/profanity_filter.dart';
+import '../services/profile_service.dart';
 import '../services/supabase_service.dart';
 import '../icons/nool_emojis.dart';
 import '../icons/nool_icons.dart';
@@ -52,6 +53,7 @@ class _CommentsSheetState extends State<CommentsSheet> {
 
   StreamSubscription<List<CommentItem>>? _subscription;
   List<CommentItem> _comments = const [];
+  Set<String> _blockedUsernames = const {};
   bool _loading = true;
   bool _sending = false;
   bool _offlineMode = false;
@@ -86,13 +88,29 @@ class _CommentsSheetState extends State<CommentsSheet> {
       return;
     }
 
+    if (AuthService().isSignedIn) {
+      try {
+        _blockedUsernames = await ProfileService().blockedUsernameKeys();
+      } catch (_) {
+        _blockedUsernames = const {};
+      }
+    }
+
     try {
       await _subscription?.cancel();
       _subscription = supabase.watchComments(widget.videoId).listen(
         (items) {
           if (!mounted) return;
+          final visible = items
+              .where(
+                (c) => !ProfileService.usernameMatchesBlocked(
+                  c.username,
+                  _blockedUsernames,
+                ),
+              )
+              .toList(growable: false);
           setState(() {
-            _comments = items;
+            _comments = visible;
             _loading = false;
             _error = null;
           });
@@ -205,94 +223,87 @@ class _CommentsSheetState extends State<CommentsSheet> {
 
     return Align(
       alignment: Alignment.bottomCenter,
-      child: ClipRRect(
-        borderRadius: const BorderRadius.vertical(top: Radius.circular(18)),
-        child: BackdropFilter(
-          filter: ImageFilter.blur(sigmaX: 22, sigmaY: 22),
-          child: Container(
-            height: height,
-            width: double.infinity,
-            decoration: BoxDecoration(
-              color: NoolColors.night.withOpacity(0.82),
-              borderRadius:
-                  const BorderRadius.vertical(top: Radius.circular(18)),
-              border: Border.all(color: Colors.white.withOpacity(0.12), width: 1.2),
+      child: Container(
+        height: height,
+        width: double.infinity,
+        decoration: BoxDecoration(
+          color: NoolColors.night.withOpacity(0.97),
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(18)),
+          border: Border.all(color: Colors.white.withOpacity(0.12), width: 1.2),
+        ),
+        child: Column(
+          children: [
+            const SizedBox(height: 10),
+            Container(
+              width: 44,
+              height: 4,
+              decoration: BoxDecoration(
+                color: NoolColors.lavender.withOpacity(0.7),
+                borderRadius: BorderRadius.circular(99),
+              ),
             ),
-            child: Column(
-              children: [
-                const SizedBox(height: 10),
-                Container(
-                  width: 44,
-                  height: 4,
-                  decoration: BoxDecoration(
-                    color: NoolColors.lavender.withOpacity(0.7),
-                    borderRadius: BorderRadius.circular(99),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(18, 14, 18, 8),
+              child: Row(
+                children: [
+                  Text(
+                    'Yorumlar',
+                    style: GoogleFonts.syne(
+                      color: NoolColors.white,
+                      fontWeight: FontWeight.w800,
+                      fontSize: 20,
+                    ),
                   ),
-                ),
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(18, 14, 18, 8),
-                  child: Row(
-                    children: [
-                      Text(
-                        'Yorumlar',
-                        style: GoogleFonts.syne(
-                          color: NoolColors.white,
-                          fontWeight: FontWeight.w800,
-                          fontSize: 20,
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      Text(
-                        '${_comments.length}',
-                        style: GoogleFonts.syne(
-                          color: NoolColors.acid,
-                          fontWeight: FontWeight.w700,
-                          fontSize: 16,
-                        ),
-                      ),
-                      const Spacer(),
-                      if (_offlineMode)
-                        Text(
-                          'offline demo',
-                          style: GoogleFonts.syne(
-                            color: NoolColors.lavender,
-                            fontSize: 11,
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                    ],
+                  const SizedBox(width: 8),
+                  Text(
+                    '${_comments.length}',
+                    style: GoogleFonts.syne(
+                      color: NoolColors.acid,
+                      fontWeight: FontWeight.w700,
+                      fontSize: 16,
+                    ),
                   ),
-                ),
-                Expanded(child: _buildList()),
-                if (_filterWarning != null) _FilterBanner(message: _filterWarning!),
-                NoolEmojiPicker(
-                  size: 28,
-                  onSelected: (emoji) {
-                    final c = _inputController;
-                    final text = c.text;
-                    final sel = c.selection;
-                    final insertAt =
-                        sel.isValid ? sel.start : text.length;
-                    final next =
-                        text.replaceRange(insertAt, insertAt, emoji.token);
-                    c.value = TextEditingValue(
-                      text: next,
-                      selection: TextSelection.collapsed(
-                        offset: insertAt + emoji.token.length,
+                  const Spacer(),
+                  if (_offlineMode)
+                    Text(
+                      'offline demo',
+                      style: GoogleFonts.syne(
+                        color: NoolColors.lavender,
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
                       ),
-                    );
-                    _focusNode.requestFocus();
-                  },
-                ),
-                _Composer(
-                  controller: _inputController,
-                  focusNode: _focusNode,
-                  sending: _sending,
-                  onSend: _submit,
-                ),
-              ],
+                    ),
+                ],
+              ),
             ),
-          ),
+            Expanded(child: _buildList()),
+            if (_filterWarning != null) _FilterBanner(message: _filterWarning!),
+            NoolEmojiPicker(
+              size: 28,
+              onSelected: (emoji) {
+                final c = _inputController;
+                final text = c.text;
+                final sel = c.selection;
+                final insertAt =
+                    sel.isValid ? sel.start : text.length;
+                final next =
+                    text.replaceRange(insertAt, insertAt, emoji.token);
+                c.value = TextEditingValue(
+                  text: next,
+                  selection: TextSelection.collapsed(
+                    offset: insertAt + emoji.token.length,
+                  ),
+                );
+                _focusNode.requestFocus();
+              },
+            ),
+            _Composer(
+              controller: _inputController,
+              focusNode: _focusNode,
+              sending: _sending,
+              onSend: _submit,
+            ),
+          ],
         ),
       ),
     );
