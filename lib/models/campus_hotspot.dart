@@ -7,6 +7,7 @@ class CampusHotspot {
     required this.longitude,
     required this.dropCount,
     required this.distanceMeters,
+    this.vicinityRadiusMeters,
   });
 
   final String id;
@@ -16,7 +17,13 @@ class CampusHotspot {
   final int dropCount;
   final double distanceMeters;
 
-  factory CampusHotspot.fromRpc(Map<String, dynamic> row) {
+  /// Trend’de seçili yoğunluk halkası (metre) — izleme bu halka içinde kalır.
+  final double? vicinityRadiusMeters;
+
+  factory CampusHotspot.fromRpc(
+    Map<String, dynamic> row, {
+    double? vicinityRadiusMeters,
+  }) {
     return CampusHotspot(
       id: row['cluster_id']?.toString() ??
           '${row['latitude']}_${row['longitude']}',
@@ -25,19 +32,42 @@ class CampusHotspot {
       longitude: (row['longitude'] as num).toDouble(),
       dropCount: (row['drop_count'] as num?)?.toInt() ?? 0,
       distanceMeters: (row['distance_m'] as num?)?.toDouble() ?? 0,
+      vicinityRadiusMeters: vicinityRadiusMeters,
+    );
+  }
+
+  CampusHotspot copyWith({
+    String? id,
+    String? name,
+    double? latitude,
+    double? longitude,
+    int? dropCount,
+    double? distanceMeters,
+    double? vicinityRadiusMeters,
+  }) {
+    return CampusHotspot(
+      id: id ?? this.id,
+      name: name ?? this.name,
+      latitude: latitude ?? this.latitude,
+      longitude: longitude ?? this.longitude,
+      dropCount: dropCount ?? this.dropCount,
+      distanceMeters: distanceMeters ?? this.distanceMeters,
+      vicinityRadiusMeters: vicinityRadiusMeters ?? this.vicinityRadiusMeters,
     );
   }
 
   String get distanceLabel {
     if (distanceMeters < 1000) {
-      return '${distanceMeters.round()}m uzakta';
+      return '${distanceMeters.round()}m';
     }
-    return '${(distanceMeters / 1000).toStringAsFixed(1)}km uzakta';
+    final km = distanceMeters / 1000;
+    if (km < 10) return '${km.toStringAsFixed(1)}km';
+    return '${km.round()}km';
   }
 
   String get dropsLabel {
-    if (dropCount == 1) return '1 Aktif Video';
-    return '$dropCount Drops';
+    if (dropCount == 1) return '1 video';
+    return '$dropCount video';
   }
 }
 
@@ -47,11 +77,17 @@ class HotspotFeedFilter {
     required this.latitude,
     required this.longitude,
     required this.name,
-    this.radiusMeters = 280,
+    this.radiusMeters = 320,
+    this.vicinityRadiusMeters,
   });
 
   final double latitude;
   final double longitude;
   final String name;
+
+  /// Hotspot kümesi izleme yarıçapı.
   final double radiusMeters;
+
+  /// Kullanıcının aktif yoğunluk halkası — dünya geneli fallback yok.
+  final double? vicinityRadiusMeters;
 }

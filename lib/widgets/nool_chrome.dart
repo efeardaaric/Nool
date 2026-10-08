@@ -38,7 +38,8 @@ class NoolAtmosphere extends StatelessWidget {
               colors: [
                 NoolColors.night,
                 Color.lerp(NoolColors.night, glow, 0.10 * intensity)!,
-                Color.lerp(NoolColors.night, NoolColors.lavender, 0.12 * intensity)!,
+                Color.lerp(
+                    NoolColors.night, NoolColors.lavender, 0.12 * intensity)!,
                 NoolColors.night,
               ],
               stops: const [0.0, 0.35, 0.7, 1.0],
@@ -50,7 +51,7 @@ class NoolAtmosphere extends StatelessWidget {
           right: -60,
           child: _GlowBlob(
             size: 220,
-            color: glow.withOpacity(0.14 * intensity),
+            color: glow.withValues(alpha: 0.14 * intensity),
           ),
         ),
         Positioned(
@@ -58,7 +59,7 @@ class NoolAtmosphere extends StatelessWidget {
           left: -70,
           child: _GlowBlob(
             size: 180,
-            color: NoolColors.tangerine.withOpacity(0.10 * intensity),
+            color: NoolColors.tangerine.withValues(alpha: 0.10 * intensity),
           ),
         ),
         if (child != null) child!,
@@ -96,12 +97,14 @@ class BrutalPressable extends StatefulWidget {
     super.key,
     required this.child,
     required this.onTap,
+    this.onLongPress,
     this.offset = const Offset(4, 4),
     this.enabled = true,
   });
 
   final Widget child;
   final VoidCallback? onTap;
+  final VoidCallback? onLongPress;
   final Offset offset;
   final bool enabled;
 
@@ -123,6 +126,12 @@ class _BrutalPressableState extends State<BrutalPressable> {
           ? () {
               HapticFeedback.selectionClick();
               widget.onTap?.call();
+            }
+          : null,
+      onLongPress: widget.enabled && widget.onLongPress != null
+          ? () {
+              HapticFeedback.mediumImpact();
+              widget.onLongPress!();
             }
           : null,
       child: AnimatedContainer(
@@ -174,7 +183,7 @@ class NoolGlassPanel extends StatelessWidget {
         child: Container(
           padding: padding,
           decoration: BoxDecoration(
-            color: (tint ?? NoolColors.lavender).withOpacity(0.12),
+            color: (tint ?? NoolColors.lavender).withValues(alpha: 0.12),
             border: Border.all(color: NoolColors.ink, width: borderWidth),
           ),
           child: child,
@@ -187,12 +196,12 @@ class NoolGlassPanel extends StatelessWidget {
 /// Sekme / sayfa geçişi — fade + hafif slide.
 Route<T> noolRoute<T>({
   required Widget page,
-  Duration duration = const Duration(milliseconds: 280),
-  Offset begin = const Offset(0, 0.04),
+  Duration duration = const Duration(milliseconds: 380),
+  Offset begin = const Offset(0, 0.05),
 }) {
   return PageRouteBuilder<T>(
     transitionDuration: duration,
-    reverseTransitionDuration: const Duration(milliseconds: 220),
+    reverseTransitionDuration: const Duration(milliseconds: 280),
     pageBuilder: (_, __, ___) => page,
     transitionsBuilder: (_, anim, __, child) {
       final curved = CurvedAnimation(
@@ -203,7 +212,8 @@ Route<T> noolRoute<T>({
       return FadeTransition(
         opacity: curved,
         child: SlideTransition(
-          position: Tween<Offset>(begin: begin, end: Offset.zero).animate(curved),
+          position:
+              Tween<Offset>(begin: begin, end: Offset.zero).animate(curved),
           child: child,
         ),
       );
@@ -236,7 +246,7 @@ class _ScanPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     final paint = Paint()
-      ..color = NoolColors.white.withOpacity(opacity)
+      ..color = NoolColors.white.withValues(alpha: opacity)
       ..strokeWidth = 1;
     const gap = 6.0;
     for (var y = 0.0; y < size.height; y += gap) {
@@ -251,7 +261,8 @@ class _ScanPainter extends CustomPainter {
 
 /// Acid shimmer text pulse (marka vurgusu).
 class NoolPulse extends StatefulWidget {
-  const NoolPulse({super.key, required this.child, this.min = 0.96, this.max = 1.04});
+  const NoolPulse(
+      {super.key, required this.child, this.min = 0.96, this.max = 1.04});
 
   final Widget child;
   final double min;

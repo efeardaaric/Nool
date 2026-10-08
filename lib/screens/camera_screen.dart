@@ -1,50 +1,60 @@
 import 'dart:async';
 import 'dart:io';
-import 'dart:math' as math;
-import 'dart:ui';
 
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
-import 'package:image_picker/image_picker.dart';
 import 'package:video_player/video_player.dart';
 
 import '../icons/nool_icons.dart';
+import '../l10n/app_strings.dart';
+import '../services/auth_service.dart';
 import '../services/location_service.dart';
 import '../services/onboarding_service.dart';
+import '../services/profile_service.dart';
+import '../services/squad_group_service.dart';
 import '../services/supabase_service.dart';
 import '../theme/colors.dart';
+import '../utils/user_error.dart';
+import '../widgets/claim_student_email_sheet.dart';
 import '../widgets/nool_lottie.dart';
 
-const _maxRecordSeconds = 15;
-
-/// Mystery Camera — 15sn kayıt, gerçek zamanlı piksel filtresi, Supabase drop.
+/// Kamera — sınırsız süre kayıt, önizleme, Supabase drop.
+///
+/// [groupId] verilirse campus yerine kadro `group-drops` yüklemesi yapılır.
 class CameraScreen extends StatefulWidget {
   const CameraScreen({
     super.key,
     this.isActive = true,
     this.onExit,
     this.onDropped,
+    this.groupId,
+    this.groupName,
   });
 
   final bool isActive;
   final VoidCallback? onExit;
   final VoidCallback? onDropped;
 
+  /// Kadro drop modu — doluysa `SquadGroupService.dropVideoToGroup`.
+  final String? groupId;
+
+  /// Grup adı — upload UI’da hedef etiketi için.
+  final String? groupName;
+
   @override
   State<CameraScreen> createState() => _CameraScreenState();
 }
 
 class _CameraScreenState extends State<CameraScreen>
-    with WidgetsBindingObserver, SingleTickerProviderStateMixin {
+    with WidgetsBindingObserver {
   CameraController? _camera;
   List<CameraDescription> _cameras = const [];
   int _cameraIndex = 0;
 
   bool _initializing = true;
   String? _error;
-  bool _mysteryMode = true;
   bool _flashOn = false;
   bool _recording = false;
   bool _busy = false;
@@ -52,11 +62,38 @@ class _CameraScreenState extends State<CameraScreen>
   String? _recordedPath;
   VideoPlayerController? _playback;
 
-  bool _robotizeVoice = false;
   bool _dropping = false;
   final _captionController = TextEditingController();
 
-  late final AnimationController _progressController;
+  /// `true` → visibility=campus (aynı domain); `false` → public / Near You.
+  bool _dropToCampus = false;
+  bool _hasCampusAccess = false;
+  String? _campusDomain;
+
+  Timer? _recordTimer;
+  int _elapsedSeconds = 0;
+
+  /// Optical / digital zoom for the active camera (Instagram-style drag).
+  double _minZoom = 1.0;
+  double _maxZoom = 1.0;
+  double _currentZoom = 1.0;
+  double _zoomAtGestureStart = 1.0;
+  bool _zoomUiVisible = false;
+  bool _zoomGestureActive = false;
+  Timer? _zoomLabelTimer;
+
+  static const _groupMaxSeconds = 15;
+
+  bool get _isGroupDrop {
+    final id = widget.groupId;
+    return id != null && id.isNotEmpty;
+  }
+
+  String get _groupLabel {
+    final name = widget.groupName?.trim();
+    if (name != null && name.isNotEmpty) return name;
+    return 'Kadro';
+  }
 
   bool get _isFront {
     if (_cameras.isEmpty || _cameraIndex >= _cameras.length) return true;
@@ -67,19 +104,33 @@ class _CameraScreenState extends State<CameraScreen>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _progressController = AnimationController(
-      vsync: this,
-      duration: const Duration(seconds: _maxRecordSeconds),
-    )..addStatusListener((status) {
-        if (status == AnimationStatus.completed && _recording) {
-          unawaited(_stopRecording());
-        }
-      });
+    unawaited(_refreshCampusAccess());
     if (widget.isActive) {
       unawaited(_boot());
     } else {
       _initializing = false;
     }
+  }
+
+  Future<void> _refreshCampusAccess() async {
+    if (!SupabaseService.instance.isReady || !AuthService().isSignedIn) {
+      if (!mounted) return;
+      setState(() {
+        _hasCampusAccess = false;
+        _campusDomain = null;
+        _dropToCampus = false;
+      });
+      return;
+    }
+    try {
+      final profile = await ProfileService().fetchMyProfile();
+      if (!mounted) return;
+      setState(() {
+        _hasCampusAccess = profile?.hasCampusAccess ?? false;
+        _campusDomain = profile?.campusDomain;
+        if (!_hasCampusAccess) _dropToCampus = false;
+      });
+    } catch (_) {}
   }
 
   @override
@@ -95,11 +146,33 @@ class _CameraScreenState extends State<CameraScreen>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    _progressController.dispose();
+    _recordTimer?.cancel();
+    _zoomLabelTimer?.cancel();
     _captionController.dispose();
     _playback?.dispose();
-    _camera?.dispose();
+    final cam = _camera;
+    _camera = null;
+    unawaited(cam?.dispose() ?? Future<void>.value());
     super.dispose();
+  }
+
+  void _startElapsedTimer() {
+    _recordTimer?.cancel();
+    _elapsedSeconds = 0;
+    _recordTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!mounted || !_recording) return;
+      final next = _elapsedSeconds + 1;
+      setState(() => _elapsedSeconds = next);
+      // Kadro drop: 15 sn soft cap.
+      if (_isGroupDrop && next >= _groupMaxSeconds) {
+        unawaited(_stopRecording());
+      }
+    });
+  }
+
+  void _stopElapsedTimer() {
+    _recordTimer?.cancel();
+    _recordTimer = null;
   }
 
   Future<void> _tearDownCamera() async {
@@ -108,8 +181,8 @@ class _CameraScreenState extends State<CameraScreen>
         await _camera?.stopVideoRecording();
       } catch (_) {}
     }
-    _progressController.stop();
-    _progressController.reset();
+    _stopElapsedTimer();
+    _elapsedSeconds = 0;
     await _playback?.dispose();
     _playback = null;
     final cam = _camera;
@@ -127,6 +200,10 @@ class _CameraScreenState extends State<CameraScreen>
       _initializing = false;
       _error = null;
       _dropping = false;
+      _minZoom = 1.0;
+      _maxZoom = 1.0;
+      _currentZoom = 1.0;
+      _zoomUiVisible = false;
     });
   }
 
@@ -152,8 +229,10 @@ class _CameraScreenState extends State<CameraScreen>
     if (controller == null || !controller.value.isInitialized) return;
 
     if (state == AppLifecycleState.inactive) {
-      unawaited(controller.dispose());
-      _camera = null;
+      unawaited(() async {
+        await controller.dispose();
+        _camera = null;
+      }());
     } else if (state == AppLifecycleState.resumed) {
       unawaited(_initCamera(_cameraIndex));
     }
@@ -200,16 +279,11 @@ class _CameraScreenState extends State<CameraScreen>
     await previous?.dispose();
 
     final description = _cameras[index];
-    // Android’de medium daha az jank; iOS high + bgra8888 daha akıcı preview.
-    final preset =
-        Platform.isAndroid ? ResolutionPreset.medium : ResolutionPreset.high;
-    final format =
-        Platform.isIOS ? ImageFormatGroup.bgra8888 : ImageFormatGroup.yuv420;
     final controller = CameraController(
       description,
-      preset,
+      ResolutionPreset.high,
       enableAudio: true,
-      imageFormatGroup: format,
+      imageFormatGroup: ImageFormatGroup.jpeg,
     );
 
     try {
@@ -218,6 +292,19 @@ class _CameraScreenState extends State<CameraScreen>
       try {
         await controller.setFlashMode(FlashMode.off);
       } catch (_) {}
+
+      var minZoom = 1.0;
+      var maxZoom = 1.0;
+      try {
+        minZoom = await controller.getMinZoomLevel();
+        maxZoom = await controller.getMaxZoomLevel();
+        if (maxZoom < minZoom) maxZoom = minZoom;
+      } catch (_) {}
+      final initialZoom = 1.0.clamp(minZoom, maxZoom);
+      try {
+        await controller.setZoomLevel(initialZoom);
+      } catch (_) {}
+
       if (!mounted) {
         await controller.dispose();
         return;
@@ -227,6 +314,10 @@ class _CameraScreenState extends State<CameraScreen>
         _cameraIndex = index;
         _flashOn = false;
         _initializing = false;
+        _minZoom = minZoom;
+        _maxZoom = maxZoom;
+        _currentZoom = initialZoom;
+        _zoomUiVisible = false;
       });
     } catch (e) {
       await controller.dispose();
@@ -238,6 +329,63 @@ class _CameraScreenState extends State<CameraScreen>
     }
   }
 
+  Future<void> _applyZoom(double zoom, {bool keepLabel = true}) async {
+    final cam = _camera;
+    if (cam == null || !cam.value.isInitialized) return;
+    if (_maxZoom <= _minZoom) return;
+
+    final clamped = zoom.clamp(_minZoom, _maxZoom).toDouble();
+    if ((clamped - _currentZoom).abs() < 0.005) return;
+
+    // Optimistic UI so rapid drag frames stay smooth.
+    if (mounted) {
+      setState(() {
+        _currentZoom = clamped;
+        if (keepLabel) _zoomUiVisible = true;
+      });
+    } else {
+      _currentZoom = clamped;
+    }
+
+    try {
+      await cam.setZoomLevel(clamped);
+    } catch (_) {}
+  }
+
+  void _beginZoomGesture() {
+    _zoomAtGestureStart = _currentZoom;
+    _zoomGestureActive = true;
+    _zoomLabelTimer?.cancel();
+    if (mounted) setState(() => _zoomUiVisible = true);
+  }
+
+  void _endZoomGesture() {
+    _zoomGestureActive = false;
+    _scheduleHideZoomLabel();
+  }
+
+  void _scheduleHideZoomLabel() {
+    _zoomLabelTimer?.cancel();
+    _zoomLabelTimer = Timer(const Duration(milliseconds: 900), () {
+      if (!mounted || _zoomGestureActive) return;
+      setState(() => _zoomUiVisible = false);
+    });
+  }
+
+  /// [pixelsUp] = how far the finger moved up from the drag start (positive = zoom in).
+  void _onZoomDragUpdate(double pixelsUp) {
+    final range = _maxZoom - _minZoom;
+    if (range <= 0) return;
+    // ~220 logical px covers min→max (Instagram / Reels feel).
+    final next = _zoomAtGestureStart + (pixelsUp / 220.0) * range;
+    unawaited(_applyZoom(next));
+  }
+
+  void _onPinchZoom(double scaleFromStart) {
+    if (scaleFromStart <= 0) return;
+    unawaited(_applyZoom(_zoomAtGestureStart * scaleFromStart));
+  }
+
   Future<void> _flipCamera() async {
     if (_cameras.length < 2 || _recording || _busy || _dropping) return;
     final next = (_cameraIndex + 1) % _cameras.length;
@@ -247,7 +395,7 @@ class _CameraScreenState extends State<CameraScreen>
   Future<void> _toggleFlash() async {
     final cam = _camera;
     if (cam == null || !cam.value.isInitialized || _isFront) {
-      _toast('Flaş yalnızca arka kamerada.');
+      _toast(AppStrings.fromSettings().cameraFlashRearOnly);
       return;
     }
     final next = !_flashOn;
@@ -256,7 +404,7 @@ class _CameraScreenState extends State<CameraScreen>
       if (!mounted) return;
       setState(() => _flashOn = next);
     } catch (_) {
-      _toast('Flaş bu cihazda desteklenmiyor.');
+      _toast(AppStrings.fromSettings().cameraFlashUnsupported);
     }
   }
 
@@ -277,29 +425,28 @@ class _CameraScreenState extends State<CameraScreen>
     setState(() => _busy = true);
     try {
       await controller.startVideoRecording();
-      _progressController
-        ..reset()
-        ..forward();
+      _startElapsedTimer();
       setState(() {
         _recording = true;
         _busy = false;
       });
     } catch (_) {
       setState(() => _busy = false);
-      _toast('Kayıt başlatılamadı');
+      _toast(AppStrings.fromSettings().cameraRecordFailed);
     }
   }
 
   Future<void> _stopRecording() async {
     final controller = _camera;
     if (controller == null || !controller.value.isRecordingVideo) {
+      _stopElapsedTimer();
       setState(() => _recording = false);
       return;
     }
 
     setState(() => _busy = true);
     try {
-      _progressController.stop();
+      _stopElapsedTimer();
       final file = await controller.stopVideoRecording();
       try {
         await controller.setFlashMode(FlashMode.off);
@@ -321,82 +468,8 @@ class _CameraScreenState extends State<CameraScreen>
         _recording = false;
         _busy = false;
       });
-      _toast('Kayıt durdurulamadı');
+      _toast(AppStrings.fromSettings().cameraStopFailed);
     }
-  }
-
-  Future<void> _pickFromGallery() async {
-    if (_busy || _dropping || _recording) return;
-
-    setState(() => _busy = true);
-    try {
-      final picked = await ImagePicker().pickVideo(
-        source: ImageSource.gallery,
-        maxDuration: const Duration(seconds: _maxRecordSeconds),
-      );
-      if (picked == null) {
-        if (mounted) setState(() => _busy = false);
-        return;
-      }
-
-      if (!_looksLikeVideo(picked)) {
-        if (mounted) setState(() => _busy = false);
-        _toast('Sadece video seçebilirsin.');
-        return;
-      }
-
-      final path = picked.path;
-      final probe = VideoPlayerController.file(File(path));
-      try {
-        await probe.initialize();
-        final seconds = probe.value.duration.inMilliseconds / 1000.0;
-        // Küçük tolerans: meta veri bazen 15.0x gösterir.
-        if (seconds > _maxRecordSeconds + 0.35) {
-          await probe.dispose();
-          if (!mounted) return;
-          setState(() => _busy = false);
-          _toast(
-            'Video en fazla $_maxRecordSeconds saniye olabilir. '
-            'Daha kısa bir klip seç.',
-          );
-          return;
-        }
-        await probe.dispose();
-      } catch (_) {
-        await probe.dispose();
-        if (!mounted) return;
-        setState(() => _busy = false);
-        _toast('Video okunamadı. Başka bir dosya dene.');
-        return;
-      }
-
-      // Kayıt sonrası gibi kamerayı kapat — bellek / donanım serbest.
-      final cam = _camera;
-      _camera = null;
-      try {
-        await cam?.setFlashMode(FlashMode.off);
-      } catch (_) {}
-      await cam?.dispose();
-
-      await _openPlayback(path);
-      if (!mounted) return;
-      setState(() {
-        _busy = false;
-        _flashOn = false;
-      });
-    } catch (_) {
-      if (!mounted) return;
-      setState(() => _busy = false);
-      _toast('Galeriden video seçilemedi.');
-    }
-  }
-
-  bool _looksLikeVideo(XFile file) {
-    final mime = file.mimeType?.toLowerCase();
-    if (mime != null && mime.startsWith('video/')) return true;
-    final lower = file.path.toLowerCase();
-    const exts = ['.mp4', '.mov', '.m4v', '.webm', '.3gp', '.mkv', '.avi'];
-    return exts.any(lower.endsWith);
   }
 
   Future<void> _openPlayback(String path) async {
@@ -413,24 +486,39 @@ class _CameraScreenState extends State<CameraScreen>
     setState(() {
       _recordedPath = path;
       _playback = player;
-      if (_captionController.text.trim().isEmpty) {
-        _captionController.text = _mysteryMode
-            ? 'gizem drop — yüz yok, kaos var'
-            : '';
-      }
     });
   }
 
   Future<void> _retake() async {
     await _playback?.dispose();
     _playback = null;
-    _progressController.reset();
+    _stopElapsedTimer();
+    _elapsedSeconds = 0;
     _captionController.clear();
     setState(() {
       _recordedPath = null;
-      _robotizeVoice = false;
+      _dropToCampus = false;
     });
     await _boot();
+  }
+
+  Future<void> _ensureCampusAudience() async {
+    if (_hasCampusAccess) return;
+    final s = AppStrings.fromSettings();
+    if (!AuthService().isSignedIn) {
+      _toast(s.campusEmailSignInRequired);
+      return;
+    }
+    final profile = await showClaimStudentEmailSheet(context);
+    if (!mounted) return;
+    if (profile != null && profile.hasCampusAccess) {
+      setState(() {
+        _hasCampusAccess = true;
+        _campusDomain = profile.campusDomain;
+        _dropToCampus = true;
+      });
+      _toast(s.campusEmailLinkedToast);
+    }
   }
 
   Future<void> _dropIt() async {
@@ -438,41 +526,86 @@ class _CameraScreenState extends State<CameraScreen>
     if (path == null || _dropping) return;
 
     if (!SupabaseService.instance.isReady) {
-      _toast('Supabase bağlı değil — dart-define anahtarlarını kontrol et.');
+      _toast(AppStrings.fromSettings().supabaseNotConfigured);
       return;
     }
 
+    final s = AppStrings.fromSettings();
     final caption = _captionController.text.trim();
     if (caption.isEmpty) {
-      _toast('Bir açıklama yaz — kampüs ne olduğunu bilsin.');
+      _toast(_isGroupDrop ? s.captionRequiredGroup : s.captionRequired);
       return;
+    }
+
+    if (!_isGroupDrop && _dropToCampus && !_hasCampusAccess) {
+      await _ensureCampusAudience();
+      if (!_hasCampusAccess) {
+        _toast(s.campusDropNeedsEmail);
+        return;
+      }
     }
 
     setState(() => _dropping = true);
     try {
-      final position = await LocationService.getCurrentPosition();
-      final onboard = await OnboardingService.ensureOnboarded();
-
-      // Kamera zaten kapalı; playback’i de durdur.
       await _playback?.pause();
 
+      if (_isGroupDrop) {
+        await SquadGroupService().dropVideoToGroup(
+          groupId: widget.groupId!,
+          videoFile: File(path),
+          caption: caption,
+        );
+        if (!mounted) return;
+        _toast(s.dropToGroupToast(_groupLabel));
+        _handleDropped();
+        return;
+      }
+
+      final position = await LocationService.getCurrentPosition();
+      final onboard = await OnboardingService.ensureOnboarded();
+      // Gerçek profil adı — onboarding @anon_* yerine.
+      String username = onboard.username;
+      try {
+        final profile = await ProfileService().fetchMyProfile();
+        final fromProfile = profile?.username.trim();
+        if (fromProfile != null && fromProfile.isNotEmpty) {
+          username =
+              fromProfile.startsWith('@') ? fromProfile : '@$fromProfile';
+        } else {
+          final authName = AuthService().displayName?.trim();
+          if (authName != null && authName.isNotEmpty) {
+            username = authName.startsWith('@') ? authName : '@$authName';
+          }
+        }
+      } catch (_) {}
+
+      final visibility = _dropToCampus ? 'campus' : 'public';
       await SupabaseService.instance.uploadVideo(
         file: File(path),
         latitude: position.latitude,
         longitude: position.longitude,
-        username: onboard.username,
+        username: username,
         deviceId: onboard.deviceId,
         caption: caption,
-        subtitle: _mysteryMode ? 'Mystery Mode' : 'Campus drop',
-        trackLabel:
-            _robotizeVoice ? 'anon voice (robot) — soon' : 'original audio',
+        subtitle: _dropToCampus
+            ? (_campusDomain != null
+                ? 'Campus · $_campusDomain'
+                : 'Campus drop')
+            : 'Near You drop',
+        trackLabel: 'original audio',
+        visibility: visibility,
       );
 
       if (!mounted) return;
-      _toast('Drop edildi. Kaos yolda.');
+      _toast(
+        _dropToCampus
+            ? s.campusDropDone(_campusDomain ?? 'kampüs')
+            : s.dropDone,
+      );
       _handleDropped();
     } catch (e) {
-      _toast('Yükleme başarısız: $e');
+      if (!mounted) return;
+      _toast(userFacingError(e, context.s));
     } finally {
       if (mounted) setState(() => _dropping = false);
     }
@@ -497,55 +630,55 @@ class _CameraScreenState extends State<CameraScreen>
 
   @override
   Widget build(BuildContext context) {
-    // Floating nav (~76) + gap; LayoutManager bottom inset ayrı hesaplanır.
-    final shellPad = widget.onExit != null ? 100.0 : 0.0;
+    final mq = MediaQuery.of(context);
+    // Use viewPadding so keyboard never collapses safe insets (status bar / home).
+    final safeTop = mq.viewPadding.top;
+    final safeBottom = mq.viewPadding.bottom;
+    final keyboard = mq.viewInsets.bottom;
+    // Floating nav: safeBottom + 12 + ~72px. Match layout CTA clearance.
+    // When keyboard is open, sit above it instead of the floating nav.
+    final aboveChrome = keyboard > 0
+        ? keyboard + 12
+        : (widget.onExit != null ? safeBottom + 100 : safeBottom + 20);
 
     return Scaffold(
       backgroundColor: NoolColors.night,
-      resizeToAvoidBottomInset: true,
+      // Don't resize the whole camera shell — pad the drop panel locally.
+      // (resizeToAvoidBottomInset + viewInsets double-count crushed top chrome.)
+      resizeToAvoidBottomInset: false,
       body: AnnotatedRegion<SystemUiOverlayStyle>(
         value: SystemUiOverlayStyle.light,
         child: Stack(
           fit: StackFit.expand,
           children: [
             if (_recordedPath != null && _playback != null)
-              _PlaybackLayer(
-                controller: _playback!,
-                mysteryMode: _mysteryMode,
-              )
+              _PlaybackLayer(controller: _playback!)
             else
               _CameraLayer(
                 controller: _camera,
                 initializing: _initializing,
                 error: _error,
-                mysteryMode: _mysteryMode,
                 onRetry: _boot,
+                onPinchZoomStart: _beginZoomGesture,
+                onPinchZoom: _onPinchZoom,
+                onPinchZoomEnd: _endZoomGesture,
               ),
             Positioned(
               top: 0,
               left: 0,
               right: 0,
-              child: SafeArea(
-                bottom: false,
+              child: Padding(
+                padding: EdgeInsets.only(top: safeTop),
                 child: Column(
                   children: [
-                    AnimatedBuilder(
-                      animation: _progressController,
-                      builder: (_, __) {
-                        final show = _recording ||
-                            (_progressController.value > 0 &&
-                                _recordedPath == null);
-                        return Opacity(
-                          opacity: show ? 1 : 0,
-                          child: LinearProgressIndicator(
-                            value: _progressController.value.clamp(0.0, 1.0),
-                            minHeight: 4,
-                            backgroundColor: Colors.white12,
-                            color: NoolColors.acid,
-                          ),
-                        );
-                      },
-                    ),
+                    if (_recording)
+                      const LinearProgressIndicator(
+                        minHeight: 4,
+                        backgroundColor: Colors.white12,
+                        color: NoolColors.acid,
+                      )
+                    else
+                      const SizedBox(height: 4),
                     Padding(
                       padding: const EdgeInsets.fromLTRB(12, 10, 12, 0),
                       child: Row(
@@ -558,8 +691,10 @@ class _CameraScreenState extends State<CameraScreen>
                           if (_recordedPath == null)
                             Text(
                               _recording
-                                  ? '${(_progressController.value * _maxRecordSeconds).ceil().clamp(0, _maxRecordSeconds)}s'
-                                  : 'MAX ${_maxRecordSeconds}s',
+                                  ? (_isGroupDrop
+                                      ? '${_elapsedSeconds}s / ${_groupMaxSeconds}s'
+                                      : '${_elapsedSeconds}s')
+                                  : (_isGroupDrop ? 'KADRO' : 'REC'),
                               style: GoogleFonts.syne(
                                 color: NoolColors.acid,
                                 fontWeight: FontWeight.w800,
@@ -581,7 +716,7 @@ class _CameraScreenState extends State<CameraScreen>
                               onTap: _flipCamera,
                             ),
                           ] else
-                            const SizedBox(width: 96),
+                            const SizedBox(width: 48),
                         ],
                       ),
                     ),
@@ -589,43 +724,60 @@ class _CameraScreenState extends State<CameraScreen>
                 ),
               ),
             ),
+            if (_recordedPath == null && _zoomUiVisible)
+              Positioned(
+                left: 0,
+                right: 0,
+                bottom: aboveChrome + 108,
+                child: Center(
+                  child: _ZoomBadge(zoom: _currentZoom),
+                ),
+              ),
             if (_recordedPath == null)
               Positioned(
                 left: 0,
                 right: 0,
-                bottom: 0,
-                child: Padding(
-                  padding: EdgeInsets.only(bottom: shellPad),
-                  child: _CaptureControls(
-                    mysteryMode: _mysteryMode,
-                    recording: _recording,
-                    busy: _busy,
-                    onMysteryChanged: (v) => setState(() => _mysteryMode = v),
-                    onRecord: _toggleRecord,
-                    onGallery: _pickFromGallery,
-                  ),
+                bottom: aboveChrome,
+                child: _CaptureControls(
+                  recording: _recording,
+                  busy: _busy,
+                  canZoom: _maxZoom > _minZoom + 0.01,
+                  onRecord: _toggleRecord,
+                  onZoomDragStart: _beginZoomGesture,
+                  onZoomDrag: _onZoomDragUpdate,
+                  onZoomDragEnd: _endZoomGesture,
                 ),
               )
             else
               Positioned(
                 left: 0,
                 right: 0,
-                bottom: 0,
-                child: Padding(
-                  padding: EdgeInsets.only(
-                    bottom: shellPad + MediaQuery.viewInsetsOf(context).bottom,
-                  ),
-                  child: _DropPanel(
-                    captionController: _captionController,
-                    robotizeVoice: _robotizeVoice,
-                    onRobotizeChanged: (v) =>
-                        setState(() => _robotizeVoice = v),
-                    onRetake: _dropping ? null : _retake,
-                    onDrop: _dropIt,
-                  ),
+                bottom: aboveChrome,
+                child: _DropPanel(
+                  captionController: _captionController,
+                  onRetake: _dropping ? null : _retake,
+                  onDrop: _dropIt,
+                  isGroupDrop: _isGroupDrop,
+                  groupName: _groupLabel,
+                  dropToCampus: _dropToCampus,
+                  hasCampusAccess: _hasCampusAccess,
+                  campusDomain: _campusDomain,
+                  onAudienceChanged: (campus) async {
+                    if (campus && !_hasCampusAccess) {
+                      await _ensureCampusAudience();
+                      return;
+                    }
+                    setState(() => _dropToCampus = campus);
+                  },
                 ),
               ),
-            if (_dropping) const _UploadingOverlay(),
+            if (_dropping)
+              _UploadingOverlay(
+                isGroupDrop: _isGroupDrop,
+                groupName: _groupLabel,
+                dropToCampus: _dropToCampus,
+                campusDomain: _campusDomain,
+              ),
           ],
         ),
       ),
@@ -634,12 +786,27 @@ class _CameraScreenState extends State<CameraScreen>
 }
 
 class _UploadingOverlay extends StatelessWidget {
-  const _UploadingOverlay();
+  const _UploadingOverlay({
+    required this.isGroupDrop,
+    required this.groupName,
+    this.dropToCampus = false,
+    this.campusDomain,
+  });
+
+  final bool isGroupDrop;
+  final String groupName;
+  final bool dropToCampus;
+  final String? campusDomain;
 
   @override
   Widget build(BuildContext context) {
+    final label = isGroupDrop
+        ? 'Sadece $groupName kadrosuna bırakılıyor…'
+        : dropToCampus
+            ? 'Campus’e bırakılıyor${campusDomain != null ? ' · @$campusDomain' : ''}…'
+            : 'Yakına bırakılıyor...';
     return ColoredBox(
-      color: NoolColors.night.withOpacity(0.82),
+      color: NoolColors.night.withValues(alpha: 0.82),
       child: Center(
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -647,7 +814,7 @@ class _UploadingOverlay extends StatelessWidget {
             const NoolLottieView.loading(width: 72, height: 72),
             const SizedBox(height: 20),
             Text(
-              'Kaos kampüse bırakılıyor...',
+              label,
               textAlign: TextAlign.center,
               style: GoogleFonts.syne(
                 color: NoolColors.acid,
@@ -667,15 +834,19 @@ class _CameraLayer extends StatelessWidget {
     required this.controller,
     required this.initializing,
     required this.error,
-    required this.mysteryMode,
     required this.onRetry,
+    this.onPinchZoomStart,
+    this.onPinchZoom,
+    this.onPinchZoomEnd,
   });
 
   final CameraController? controller;
   final bool initializing;
   final String? error;
-  final bool mysteryMode;
   final VoidCallback onRetry;
+  final VoidCallback? onPinchZoomStart;
+  final ValueChanged<double>? onPinchZoom;
+  final VoidCallback? onPinchZoomEnd;
 
   @override
   Widget build(BuildContext context) {
@@ -694,7 +865,7 @@ class _CameraLayer extends StatelessWidget {
               const SizedBox(height: 16),
               ElevatedButton(
                 onPressed: onRetry,
-                child: const Text('Yeniden dene'),
+                child: Text(context.s.retry),
               ),
             ],
           ),
@@ -723,8 +894,15 @@ class _CameraLayer extends StatelessWidget {
       );
     }
 
-    return _MysteryPreview(
-      mysteryMode: mysteryMode,
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onScaleStart: (_) => onPinchZoomStart?.call(),
+      onScaleUpdate: (details) {
+        // Ignore single-finger pans on the preview — shutter owns drag-zoom.
+        if (details.pointerCount < 2) return;
+        onPinchZoom?.call(details.scale);
+      },
+      onScaleEnd: (_) => onPinchZoomEnd?.call(),
       child: SizedBox.expand(
         child: FittedBox(
           fit: BoxFit.cover,
@@ -740,343 +918,170 @@ class _CameraLayer extends StatelessWidget {
 }
 
 class _PlaybackLayer extends StatelessWidget {
-  const _PlaybackLayer({
-    required this.controller,
-    required this.mysteryMode,
-  });
+  const _PlaybackLayer({required this.controller});
 
   final VideoPlayerController controller;
-  final bool mysteryMode;
 
   @override
   Widget build(BuildContext context) {
-    return _MysteryPreview(
-      mysteryMode: mysteryMode,
-      child: SizedBox.expand(
-        child: FittedBox(
-          fit: BoxFit.cover,
-          child: SizedBox(
-            width: controller.value.size.width,
-            height: controller.value.size.height,
-            child: VideoPlayer(controller),
-          ),
+    return SizedBox.expand(
+      child: FittedBox(
+        fit: BoxFit.cover,
+        child: SizedBox(
+          width: controller.value.size.width,
+          height: controller.value.size.height,
+          child: VideoPlayer(controller),
         ),
       ),
     );
   }
 }
 
-/// Gizem Modu: ColorFiltered + BackdropFilter + mozaik painter.
-class _MysteryPreview extends StatelessWidget {
-  const _MysteryPreview({
-    required this.mysteryMode,
-    required this.child,
-  });
+class _ZoomBadge extends StatelessWidget {
+  const _ZoomBadge({required this.zoom});
 
-  final bool mysteryMode;
-  final Widget child;
-
-  static const _glitchFilter = ColorFilter.matrix(<double>[
-    0.7, 0.15, 0.15, 0, 12,
-    0.1, 0.85, 0.05, 0, 0,
-    0.2, 0.1, 0.9, 0, 18,
-    0, 0, 0, 1, 0,
-  ]);
+  final double zoom;
 
   @override
   Widget build(BuildContext context) {
-    if (!mysteryMode) return child;
-
-    return Stack(
-      fit: StackFit.expand,
-      children: [
-        ColorFiltered(
-          colorFilter: _glitchFilter,
-          child: child,
-        ),
-        // Hafif buz + mozaik — yüz gizleme hissi
-        IgnorePointer(
-          child: BackdropFilter(
-            filter: ImageFilter.blur(sigmaX: 1.2, sigmaY: 1.2),
-            child: ShaderMask(
-              blendMode: BlendMode.dstIn,
-              shaderCallback: (bounds) {
-                return const LinearGradient(
-                  begin: Alignment.topCenter,
-                  end: Alignment.bottomCenter,
-                  colors: [
-                    Color(0xCCFFFFFF),
-                    Color(0x66FFFFFF),
-                    Color(0xEEFFFFFF),
-                  ],
-                  stops: [0.0, 0.45, 1.0],
-                ).createShader(bounds);
-              },
-              child: const CustomPaint(
-                painter: _MysteryMosaicPainter(),
-                child: SizedBox.expand(),
-              ),
-            ),
+    final label = zoom >= 10
+        ? '${zoom.toStringAsFixed(0)}x'
+        : '${zoom.toStringAsFixed(1)}x';
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      decoration: BoxDecoration(
+        color: NoolColors.night,
+        border: Border.all(color: NoolColors.ink, width: 3),
+        boxShadow: const [
+          BoxShadow(
+            color: NoolColors.ink,
+            offset: Offset(3, 3),
+            blurRadius: 0,
           ),
+        ],
+      ),
+      child: Text(
+        label,
+        style: GoogleFonts.syne(
+          color: NoolColors.acid,
+          fontWeight: FontWeight.w800,
+          fontSize: 16,
         ),
-        const IgnorePointer(
-          child: CustomPaint(
-            painter: _MysteryMosaicPainter(),
-            child: SizedBox.expand(),
-          ),
-        ),
-      ],
+      ),
     );
   }
 }
 
-class _MysteryMosaicPainter extends CustomPainter {
-  const _MysteryMosaicPainter();
+/// Shutter: tap toggles record; press-hold + drag up/down zooms (IG / Snap).
+class _CaptureControls extends StatefulWidget {
+  const _CaptureControls({
+    required this.recording,
+    required this.busy,
+    required this.canZoom,
+    required this.onRecord,
+    required this.onZoomDragStart,
+    required this.onZoomDrag,
+    required this.onZoomDragEnd,
+  });
+
+  final bool recording;
+  final bool busy;
+  final bool canZoom;
+  final VoidCallback onRecord;
+  final VoidCallback onZoomDragStart;
+  final ValueChanged<double> onZoomDrag;
+  final VoidCallback onZoomDragEnd;
 
   @override
-  void paint(Canvas canvas, Size size) {
-    const tile = 16.0;
-    final cols = (size.width / tile).ceil();
-    final rows = (size.height / tile).ceil();
-    final rng = math.Random(42);
+  State<_CaptureControls> createState() => _CaptureControlsState();
+}
 
-    final faceCenter = Offset(size.width * 0.5, size.height * 0.36);
-    final faceRx = size.width * 0.24;
-    final faceRy = size.height * 0.17;
+class _CaptureControlsState extends State<_CaptureControls> {
+  double _startY = 0;
+  bool _zooming = false;
 
-    for (var y = 0; y < rows; y++) {
-      for (var x = 0; x < cols; x++) {
-        final rect = Rect.fromLTWH(x * tile, y * tile, tile + 0.6, tile + 0.6);
-        final center = rect.center;
-        final nx = (center.dx - faceCenter.dx) / faceRx;
-        final ny = (center.dy - faceCenter.dy) / faceRy;
-        final inFace = (nx * nx + ny * ny) <= 1.2;
-
-        if (!inFace && rng.nextDouble() > 0.07) continue;
-
-        final shade = inFace ? 35 + rng.nextInt(170) : 18 + rng.nextInt(70);
-        final alpha = inFace ? 0.58 + rng.nextDouble() * 0.35 : 0.16;
-        final shift = inFace ? (rng.nextDouble() * 5 - 2.5) : 0.0;
-
-        canvas.drawRect(
-          rect.translate(shift, 0),
-          Paint()
-            ..color = Color.fromRGBO(
-              shade,
-              (shade * 0.85).round().clamp(0, 255),
-              (shade * 1.12 + 18).round().clamp(0, 255),
-              alpha,
-            ),
-        );
-
-        if (inFace && rng.nextDouble() > 0.72) {
-          canvas.drawRect(
-            rect.translate(-shift * 1.5, 1),
-            Paint()
-              ..color = NoolColors.acid.withOpacity(0.14)
-              ..blendMode = BlendMode.plus,
-          );
-        }
-      }
-    }
-
-    final linePaint = Paint()
-      ..color = Colors.black.withOpacity(0.2)
-      ..strokeWidth = 1;
-    for (var y = 0.0; y < size.height; y += 3) {
-      canvas.drawLine(Offset(0, y), Offset(size.width, y), linePaint);
-    }
+  void _finishZoomIfNeeded() {
+    if (!_zooming) return;
+    _zooming = false;
+    widget.onZoomDragEnd();
   }
 
   @override
-  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
-}
-
-class _CaptureControls extends StatelessWidget {
-  const _CaptureControls({
-    required this.mysteryMode,
-    required this.recording,
-    required this.busy,
-    required this.onMysteryChanged,
-    required this.onRecord,
-    required this.onGallery,
-  });
-
-  final bool mysteryMode;
-  final bool recording;
-  final bool busy;
-  final ValueChanged<bool> onMysteryChanged;
-  final VoidCallback onRecord;
-  final VoidCallback onGallery;
-
-  @override
   Widget build(BuildContext context) {
-    final canInteract = !busy && !recording;
-
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.center,
-        children: [
-          Flexible(
-            child: Align(
-              alignment: Alignment.centerLeft,
-              child: GestureDetector(
-                onTap: canInteract
-                    ? () => onMysteryChanged(!mysteryMode)
-                    : null,
-                child: Opacity(
-                  opacity: canInteract ? 1 : 0.45,
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 10,
-                      vertical: 10,
-                    ),
-                    decoration: BoxDecoration(
-                      color: mysteryMode
-                          ? NoolColors.acid
-                          : Colors.black.withOpacity(0.45),
-                      border: Border.all(color: NoolColors.ink, width: 3),
-                      boxShadow: const [
-                        BoxShadow(
-                          color: NoolColors.ink,
-                          offset: Offset(3, 3),
-                          blurRadius: 0,
-                        ),
-                      ],
-                    ),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(
-                          Icons.blur_on_rounded,
-                          size: 18,
-                          color:
-                              mysteryMode ? NoolColors.ink : NoolColors.white,
-                        ),
-                        const SizedBox(width: 6),
-                        Text(
-                          'GİZEM',
-                          style: GoogleFonts.syne(
-                            color: mysteryMode
-                                ? NoolColors.ink
-                                : NoolColors.white,
-                            fontWeight: FontWeight.w800,
-                            fontSize: 12,
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        Container(
-                          width: 34,
-                          height: 20,
-                          padding: const EdgeInsets.all(2),
-                          decoration: BoxDecoration(
-                            color: mysteryMode
-                                ? NoolColors.ink.withOpacity(0.2)
-                                : Colors.white24,
-                            borderRadius: BorderRadius.circular(99),
-                            border: Border.all(
-                              color: mysteryMode
-                                  ? NoolColors.ink
-                                  : NoolColors.lavender,
-                              width: 1.5,
-                            ),
-                          ),
-                          alignment: mysteryMode
-                              ? Alignment.centerRight
-                              : Alignment.centerLeft,
-                          child: Container(
-                            width: 14,
-                            height: 14,
-                            decoration: BoxDecoration(
-                              color: mysteryMode
-                                  ? NoolColors.ink
-                                  : NoolColors.lavender,
-                              shape: BoxShape.circle,
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ),
-            ),
-          ),
-          const SizedBox(width: 12),
-          GestureDetector(
-            onTap: busy ? null : onRecord,
-            child: Container(
-              width: 72,
-              height: 72,
+    // Tall hit area: drag continues via GestureDetector even above the button.
+    return SizedBox(
+      height: 220,
+      child: Align(
+        alignment: Alignment.bottomCenter,
+        child: GestureDetector(
+          behavior: HitTestBehavior.translucent,
+          onTap: widget.busy ? null : widget.onRecord,
+          onVerticalDragStart: !widget.canZoom || widget.busy
+              ? null
+              : (details) {
+                  _startY = details.globalPosition.dy;
+                  _zooming = false;
+                },
+          onVerticalDragUpdate: !widget.canZoom || widget.busy
+              ? null
+              : (details) {
+                  final pixelsUp = _startY - details.globalPosition.dy;
+                  if (!_zooming) {
+                    _zooming = true;
+                    widget.onZoomDragStart();
+                  }
+                  widget.onZoomDrag(pixelsUp);
+                },
+          onVerticalDragEnd:
+              !widget.canZoom ? null : (_) => _finishZoomIfNeeded(),
+          onVerticalDragCancel: !widget.canZoom ? null : _finishZoomIfNeeded,
+          child: Padding(
+            padding: const EdgeInsets.only(top: 120),
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 180),
+              curve: Curves.easeOut,
+              width: widget.recording ? 72 : 84,
+              height: widget.recording ? 72 : 84,
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
-                color: recording ? NoolColors.tangerine : NoolColors.acid,
-                border: Border.all(color: NoolColors.ink, width: 4),
+                color:
+                    widget.recording ? NoolColors.tangerine : NoolColors.night,
+                border: Border.all(
+                  color:
+                      widget.recording ? NoolColors.tangerine : NoolColors.acid,
+                  width: 5,
+                ),
                 boxShadow: const [
                   BoxShadow(
                     color: NoolColors.ink,
-                    offset: Offset(3, 3),
+                    offset: Offset(4, 4),
                     blurRadius: 0,
                   ),
                 ],
               ),
-              child: NoolIcon(
-                recording ? NoolIconData.stop : NoolIconData.record,
-                color: NoolColors.ink,
-                size: recording ? 30 : 34,
-              ),
-            ),
-          ),
-          const SizedBox(width: 12),
-          Flexible(
-            child: Align(
-              alignment: Alignment.centerRight,
-              child: GestureDetector(
-                onTap: canInteract ? onGallery : null,
-                child: Opacity(
-                  opacity: canInteract ? 1 : 0.45,
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 12,
-                      vertical: 12,
-                    ),
-                    decoration: BoxDecoration(
-                      color: Colors.black.withOpacity(0.45),
-                      border: Border.all(color: NoolColors.ink, width: 3),
-                      boxShadow: const [
-                        BoxShadow(
+              child: Center(
+                child: widget.recording
+                    ? Container(
+                        width: 26,
+                        height: 26,
+                        decoration: BoxDecoration(
                           color: NoolColors.ink,
-                          offset: Offset(3, 3),
-                          blurRadius: 0,
+                          borderRadius: BorderRadius.circular(4),
+                          border: Border.all(color: NoolColors.ink, width: 2),
                         ),
-                      ],
-                    ),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        const NoolIcon(
-                          NoolIconData.gallery,
+                      )
+                    : Container(
+                        width: 62,
+                        height: 62,
+                        decoration: const BoxDecoration(
+                          shape: BoxShape.circle,
                           color: NoolColors.acid,
-                          size: 20,
                         ),
-                        const SizedBox(width: 6),
-                        Text(
-                          'GALERİ',
-                          style: GoogleFonts.syne(
-                            color: NoolColors.white,
-                            fontWeight: FontWeight.w800,
-                            fontSize: 12,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
+                      ),
               ),
             ),
           ),
-        ],
+        ),
       ),
     );
   }
@@ -1085,220 +1090,294 @@ class _CaptureControls extends StatelessWidget {
 class _DropPanel extends StatelessWidget {
   const _DropPanel({
     required this.captionController,
-    required this.robotizeVoice,
-    required this.onRobotizeChanged,
     required this.onRetake,
     required this.onDrop,
+    required this.isGroupDrop,
+    required this.groupName,
+    this.dropToCampus = false,
+    this.hasCampusAccess = false,
+    this.campusDomain,
+    this.onAudienceChanged,
   });
 
   final TextEditingController captionController;
-  final bool robotizeVoice;
-  final ValueChanged<bool> onRobotizeChanged;
   final VoidCallback? onRetake;
   final VoidCallback onDrop;
+  final bool isGroupDrop;
+  final String groupName;
+  final bool dropToCampus;
+  final bool hasCampusAccess;
+  final String? campusDomain;
+  final ValueChanged<bool>? onAudienceChanged;
 
   @override
   Widget build(BuildContext context) {
-    final bottom = MediaQuery.paddingOf(context).bottom;
+    final s = context.s;
+    final dropLabel = isGroupDrop
+        ? s.dropToGroupOnly(groupName)
+        : dropToCampus
+            ? s.campusDropLabel
+            : s.nearDropLabel;
 
+    // Safe area / nav clearance handled by parent Positioned.bottom.
     return Padding(
-      padding: EdgeInsets.fromLTRB(14, 0, 14, 12 + bottom),
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(16),
-        child: BackdropFilter(
-          filter: ImageFilter.blur(sigmaX: 18, sigmaY: 18),
-          child: Container(
-            padding: const EdgeInsets.fromLTRB(14, 14, 14, 12),
-            decoration: BoxDecoration(
-              color: Colors.black.withOpacity(0.5),
-              borderRadius: BorderRadius.circular(16),
-              border: Border.all(
-                color: Colors.white.withOpacity(0.16),
-                width: 1.2,
+      padding: const EdgeInsets.fromLTRB(14, 0, 14, 8),
+      child: Container(
+        padding: const EdgeInsets.fromLTRB(14, 14, 14, 12),
+        decoration: BoxDecoration(
+          color: NoolColors.night.withValues(alpha: 0.92),
+          border: Border.all(color: NoolColors.ink, width: 3.5),
+          boxShadow: const [
+            BoxShadow(
+              color: NoolColors.ink,
+              offset: Offset(4, 4),
+              blurRadius: 0,
+            ),
+          ],
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(
+              s.cameraPreview,
+              style: GoogleFonts.syne(
+                color: NoolColors.acid,
+                fontWeight: FontWeight.w800,
+                fontSize: 18,
               ),
             ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                Text(
-                  'Önizleme',
-                  style: GoogleFonts.syne(
-                    color: NoolColors.acid,
-                    fontWeight: FontWeight.w800,
-                    fontSize: 18,
-                  ),
+            if (isGroupDrop) ...[
+              const SizedBox(height: 10),
+              Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 10,
                 ),
-                const SizedBox(height: 10),
-                Opacity(
-                  opacity: 0.55,
-                  child: IgnorePointer(
-                    child: _GlassToggle(
-                      label: 'Anonim Sesi Robotlaştır',
-                      value: robotizeVoice,
-                      onChanged: onRobotizeChanged,
-                      trailing: Text(
-                        'simülasyon',
-                        style: GoogleFonts.syne(
-                          color: NoolColors.lavender,
-                          fontSize: 11,
-                        ),
-                      ),
+                decoration: BoxDecoration(
+                  color: NoolColors.acid,
+                  border: Border.all(color: NoolColors.ink, width: 3),
+                  boxShadow: const [
+                    BoxShadow(
+                      color: NoolColors.ink,
+                      offset: Offset(3, 3),
+                      blurRadius: 0,
                     ),
-                  ),
+                  ],
                 ),
-                const SizedBox(height: 10),
-                Container(
-                  decoration: BoxDecoration(
-                    color: NoolColors.night,
-                    border: Border.all(color: NoolColors.ink, width: 3),
-                    boxShadow: const [
-                      BoxShadow(
-                        color: NoolColors.ink,
-                        offset: Offset(3, 3),
-                        blurRadius: 0,
-                      ),
-                    ],
-                  ),
-                  child: TextField(
-                    controller: captionController,
-                    maxLines: 2,
-                    maxLength: 140,
-                    style: GoogleFonts.syne(
-                      color: NoolColors.white,
-                      fontWeight: FontWeight.w600,
-                      fontSize: 14,
-                    ),
-                    cursorColor: NoolColors.acid,
-                    decoration: InputDecoration(
-                      counterText: '',
-                      hintText: 'Müzik kulübünde şok kavga!',
-                      hintStyle: GoogleFonts.syne(
-                        color: NoolColors.lavender,
-                        fontWeight: FontWeight.w500,
-                      ),
-                      border: InputBorder.none,
-                      contentPadding: const EdgeInsets.symmetric(
-                        horizontal: 12,
-                        vertical: 12,
-                      ),
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 14),
-                Row(
+                child: Row(
                   children: [
-                    Expanded(
-                      child: OutlinedButton(
-                        onPressed: onRetake,
-                        style: OutlinedButton.styleFrom(
-                          foregroundColor: NoolColors.white,
-                          side: const BorderSide(
-                            color: NoolColors.ink,
-                            width: 3,
-                          ),
-                          padding: const EdgeInsets.symmetric(vertical: 14),
-                        ),
-                        child: Text(
-                          'Yeniden',
-                          style: GoogleFonts.syne(fontWeight: FontWeight.w800),
-                        ),
-                      ),
+                    const Icon(
+                      Icons.check_circle,
+                      color: NoolColors.ink,
+                      size: 18,
                     ),
-                    const SizedBox(width: 12),
+                    const SizedBox(width: 8),
                     Expanded(
-                      flex: 2,
-                      child: Container(
-                        decoration: const BoxDecoration(
-                          boxShadow: [
-                            BoxShadow(
-                              color: NoolColors.ink,
-                              offset: Offset(4, 4),
-                              blurRadius: 0,
-                            ),
-                          ],
-                        ),
-                        child: Material(
-                          color: NoolColors.tangerine,
-                          child: InkWell(
-                            onTap: onDrop,
-                            child: Container(
-                              padding:
-                                  const EdgeInsets.symmetric(vertical: 15),
-                              decoration: BoxDecoration(
-                                border: Border.all(
-                                  color: NoolColors.ink,
-                                  width: 3.5,
-                                ),
-                              ),
-                              alignment: Alignment.center,
-                              child: Text(
-                                'Kampüse Bırak (Drop It)',
-                                style: GoogleFonts.syne(
-                                  color: NoolColors.ink,
-                                  fontWeight: FontWeight.w800,
-                                  fontSize: 14,
-                                ),
-                              ),
-                            ),
-                          ),
+                      child: Text(
+                        s.dropToGroupOnly(groupName),
+                        style: GoogleFonts.syne(
+                          color: NoolColors.ink,
+                          fontWeight: FontWeight.w800,
+                          fontSize: 13,
+                          height: 1.2,
                         ),
                       ),
                     ),
                   ],
                 ),
+              ),
+            ] else ...[
+              const SizedBox(height: 10),
+              Row(
+                children: [
+                  Expanded(
+                    child: _AudienceChip(
+                      label: s.campusAudienceNear,
+                      selected: !dropToCampus,
+                      onTap: () => onAudienceChanged?.call(false),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: _AudienceChip(
+                      label: hasCampusAccess && campusDomain != null
+                          ? '${s.campusAudienceCampus}\n@$campusDomain'
+                          : s.campusAudienceCampus,
+                      selected: dropToCampus,
+                      onTap: () => onAudienceChanged?.call(true),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              Text(
+                s.campusAudienceHint,
+                style: GoogleFonts.syne(
+                  color: NoolColors.lavender,
+                  fontWeight: FontWeight.w500,
+                  fontSize: 11,
+                  height: 1.25,
+                ),
+              ),
+              const SizedBox(height: 10),
+            ],
+            const SizedBox(height: 10),
+            Container(
+              decoration: BoxDecoration(
+                color: NoolColors.night,
+                border: Border.all(color: NoolColors.ink, width: 3),
+                boxShadow: const [
+                  BoxShadow(
+                    color: NoolColors.ink,
+                    offset: Offset(3, 3),
+                    blurRadius: 0,
+                  ),
+                ],
+              ),
+              child: TextField(
+                controller: captionController,
+                maxLines: 2,
+                maxLength: 140,
+                style: GoogleFonts.syne(
+                  color: NoolColors.white,
+                  fontWeight: FontWeight.w600,
+                  fontSize: 14,
+                ),
+                cursorColor: NoolColors.acid,
+                decoration: InputDecoration(
+                  counterText: '',
+                  hintText: isGroupDrop
+                      ? 'Kadronun bilmesi gereken…'
+                      : 'Müzik kulübünde şok kavga!',
+                  hintStyle: GoogleFonts.syne(
+                    color: NoolColors.lavender,
+                    fontWeight: FontWeight.w500,
+                  ),
+                  border: InputBorder.none,
+                  contentPadding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 12,
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(height: 14),
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton(
+                    onPressed: onRetake,
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: NoolColors.white,
+                      side: const BorderSide(
+                        color: NoolColors.ink,
+                        width: 3,
+                      ),
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                    ),
+                    child: Text(
+                      'Yeniden',
+                      style: GoogleFonts.syne(fontWeight: FontWeight.w800),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  flex: 2,
+                  child: Container(
+                    decoration: const BoxDecoration(
+                      boxShadow: [
+                        BoxShadow(
+                          color: NoolColors.ink,
+                          offset: Offset(4, 4),
+                          blurRadius: 0,
+                        ),
+                      ],
+                    ),
+                    child: Material(
+                      color: isGroupDrop || dropToCampus
+                          ? NoolColors.acid
+                          : NoolColors.tangerine,
+                      child: InkWell(
+                        onTap: onDrop,
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(vertical: 15),
+                          decoration: BoxDecoration(
+                            border: Border.all(
+                              color: NoolColors.ink,
+                              width: 3.5,
+                            ),
+                          ),
+                          alignment: Alignment.center,
+                          child: Text(
+                            dropLabel,
+                            textAlign: TextAlign.center,
+                            style: GoogleFonts.syne(
+                              color: NoolColors.ink,
+                              fontWeight: FontWeight.w800,
+                              fontSize: isGroupDrop ? 12 : 14,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
               ],
             ),
-          ),
+          ],
         ),
       ),
     );
   }
 }
 
-class _GlassToggle extends StatelessWidget {
-  const _GlassToggle({
+class _AudienceChip extends StatelessWidget {
+  const _AudienceChip({
     required this.label,
-    required this.value,
-    required this.onChanged,
-    this.trailing,
+    required this.selected,
+    required this.onTap,
   });
 
   final String label;
-  final bool value;
-  final ValueChanged<bool> onChanged;
-  final Widget? trailing;
+  final bool selected;
+  final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
-    return InkWell(
-      onTap: () => onChanged(!value),
-      child: Row(
-        children: [
-          SizedBox(
-            width: 28,
-            height: 28,
-            child: Checkbox(
-              value: value,
-              onChanged: (v) => onChanged(v ?? false),
-              activeColor: NoolColors.acid,
-              checkColor: NoolColors.ink,
-              side: const BorderSide(color: NoolColors.lavender, width: 2),
+    return Material(
+      color: selected ? NoolColors.acid : NoolColors.night,
+      child: InkWell(
+        onTap: onTap,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+          decoration: BoxDecoration(
+            border: Border.all(color: NoolColors.ink, width: 3),
+            boxShadow: selected
+                ? const [
+                    BoxShadow(
+                      color: NoolColors.ink,
+                      offset: Offset(2, 2),
+                      blurRadius: 0,
+                    ),
+                  ]
+                : null,
+          ),
+          alignment: Alignment.center,
+          child: Text(
+            label,
+            textAlign: TextAlign.center,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: GoogleFonts.syne(
+              color: selected ? NoolColors.ink : NoolColors.white,
+              fontWeight: FontWeight.w800,
+              fontSize: 12,
+              height: 1.15,
             ),
           ),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Text(
-              label,
-              style: GoogleFonts.syne(
-                color: NoolColors.white,
-                fontWeight: FontWeight.w600,
-                fontSize: 14,
-              ),
-            ),
-          ),
-          if (trailing != null) trailing!,
-        ],
+        ),
       ),
     );
   }
@@ -1317,23 +1396,27 @@ class _CircleIconButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Material(
-      color: active
-          ? NoolColors.acid.withOpacity(0.9)
-          : Colors.black.withOpacity(0.4),
-      shape: const CircleBorder(
-        side: BorderSide(color: Colors.white24, width: 1.5),
-      ),
-      child: InkWell(
-        customBorder: const CircleBorder(),
-        onTap: onTap,
-        child: Padding(
-          padding: const EdgeInsets.all(10),
-          child: NoolIcon(
-            icon,
-            color: active ? NoolColors.ink : NoolColors.white,
-            size: 22,
-          ),
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.all(10),
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          color:
+              active ? NoolColors.acid : Colors.black.withValues(alpha: 0.55),
+          border: Border.all(color: NoolColors.ink, width: 3),
+          boxShadow: const [
+            BoxShadow(
+              color: NoolColors.ink,
+              offset: Offset(2, 2),
+              blurRadius: 0,
+            ),
+          ],
+        ),
+        child: NoolIcon(
+          icon,
+          color: active ? NoolColors.ink : NoolColors.white,
+          size: 22,
         ),
       ),
     );

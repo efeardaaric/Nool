@@ -10,7 +10,10 @@ class OnboardingService {
   static const _deviceIdKey = 'device_id';
   static const _usernameKey = 'username';
   static const _onboardedKey = 'nool_onboarded';
-  static const _introSeenKey = 'nool_intro_seen';
+  static const _legalAcceptedAtKey = 'nool_legal_accepted_at';
+
+  /// İlk açılış welcome / intro UI (kimlik onboarding'den ayrı).
+  static const _welcomeSeenKey = 'nool_welcome_seen';
 
   /// Eski anahtarlar — bir kez migrate edilir.
   static const _legacyDeviceIdKey = 'nool_device_id';
@@ -87,15 +90,43 @@ class OnboardingService {
     return prefs.getString(_usernameKey);
   }
 
-  /// Eğitici karşılama turu görüldü mü / atlandı mı.
-  static Future<bool> hasSeenIntro() async {
+  /// GDPR hesap silme sonrası yerel kimlik / lakap temizliği.
+  /// Sonraki açılışta ensureOnboarded yeni device_id + lakap üretir.
+  static Future<void> clearAccountLocalData() async {
     final prefs = await SharedPreferences.getInstance();
-    return prefs.getBool(_introSeenKey) ?? false;
+    await prefs.remove(_usernameKey);
+    await prefs.remove(_legacyUsernameKey);
+    await prefs.remove(_deviceIdKey);
+    await prefs.remove(_legacyDeviceIdKey);
+    await prefs.remove(_legalAcceptedAtKey);
+    await prefs.remove(_onboardedKey);
   }
 
-  static Future<void> markIntroSeen() async {
+  /// Kayıt sırasında hukuki / izin onayı damgası.
+  static Future<void> acceptLegalTerms() async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setBool(_introSeenKey, true);
+    await prefs.setString(
+      _legalAcceptedAtKey,
+      DateTime.now().toUtc().toIso8601String(),
+    );
+  }
+
+  static Future<bool> hasAcceptedLegalTerms() async {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString(_legalAcceptedAtKey);
+    return raw != null && raw.isNotEmpty;
+  }
+
+  /// Welcome carousel tamamlandı / atlandı mı?
+  static Future<bool> hasSeenWelcome() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getBool(_welcomeSeenKey) ?? false;
+  }
+
+  /// Skip veya son CTA sonrası — bir daha gösterilmez.
+  static Future<void> markWelcomeSeen() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_welcomeSeenKey, true);
   }
 
   static String _generateUsername() {

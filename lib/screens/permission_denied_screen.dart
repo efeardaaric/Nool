@@ -1,11 +1,11 @@
 import 'package:flutter/material.dart';
 
-import '../services/auth_service.dart';
+import '../l10n/app_strings.dart';
 import '../services/location_service.dart';
+import '../services/onboarding_service.dart';
 import '../theme/app_theme.dart';
 import '../theme/colors.dart';
-import 'location_gate_screen.dart';
-import 'sign_in_screen.dart';
+import 'layout_manager.dart';
 import 'splash_screen.dart';
 
 /// Konum izni reddedilince — asit yeşili uyarı kompozisyonu.
@@ -47,18 +47,22 @@ class _PermissionDeniedScreenState extends State<PermissionDeniedScreen>
     if (!mounted) return;
 
     if (granted) {
+      final username = await _resolveUsername();
       if (!mounted) return;
       Navigator.of(context).pushReplacement(
         MaterialPageRoute<void>(
-          builder: (_) => AuthService().isSignedIn
-              ? const LocationGateScreen()
-              : const SignInScreen(gateMode: true),
+          builder: (_) => LayoutManager(username: username),
         ),
       );
       return;
     }
 
     await LocationService.openAppSettings();
+  }
+
+  Future<String> _resolveUsername() async {
+    return await OnboardingService.getUsername() ??
+        AppStrings.fromSettings().anonymousHandle;
   }
 
   @override
@@ -89,7 +93,7 @@ class _PermissionDeniedScreenState extends State<PermissionDeniedScreen>
               height: 200,
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
-                color: NoolColors.acid.withOpacity(0.15),
+                color: NoolColors.acid.withValues(alpha: 0.15),
               ),
             ),
           ),
@@ -114,7 +118,7 @@ class _PermissionDeniedScreenState extends State<PermissionDeniedScreen>
                       ),
                       const Spacer(flex: 2),
                       Text(
-                        'DUR.',
+                        context.s.trendStop,
                         style:
                             Theme.of(context).textTheme.displayLarge?.copyWith(
                                   fontSize: 64,
@@ -124,7 +128,7 @@ class _PermissionDeniedScreenState extends State<PermissionDeniedScreen>
                       ),
                       const SizedBox(height: 20),
                       Text(
-                        'Yakındaki kaosu görebilmemiz için konumuna ihtiyacımız var',
+                        context.s.permissionDeniedHeadline,
                         style:
                             Theme.of(context).textTheme.headlineSmall?.copyWith(
                                   fontWeight: FontWeight.w700,
@@ -134,8 +138,7 @@ class _PermissionDeniedScreenState extends State<PermissionDeniedScreen>
                       ),
                       const SizedBox(height: 16),
                       Text(
-                        'İzin yoksa harita kör, kaos görünmez. '
-                        'Ayarlardan konumu aç, geri dön — chaos waiting.',
+                        context.s.permissionDeniedBody,
                         style: Theme.of(context).textTheme.bodyMedium?.copyWith(
                               fontSize: 16,
                               height: 1.45,
@@ -148,7 +151,7 @@ class _PermissionDeniedScreenState extends State<PermissionDeniedScreen>
                           width: double.infinity,
                           child: ElevatedButton(
                             onPressed: _retry,
-                            child: const Text('İzni yeniden dene'),
+                            child: Text(context.s.retryPermission),
                           ),
                         ),
                       ),
@@ -172,7 +175,7 @@ class _PermissionDeniedScreenState extends State<PermissionDeniedScreen>
                                 width: 3.5,
                               ),
                             ),
-                            child: const Text('Başa dön'),
+                            child: Text(context.s.backToStart),
                           ),
                         ),
                       ),

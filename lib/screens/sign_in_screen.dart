@@ -1,16 +1,21 @@
+import 'dart:io' show Platform;
 import 'dart:ui';
 
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
 
+import '../l10n/app_strings.dart';
 import '../services/auth_service.dart';
+import '../services/onboarding_service.dart';
 import '../theme/app_theme.dart';
 import '../theme/colors.dart';
+import '../utils/user_error.dart';
 import '../widgets/nool_chrome.dart';
 import '../widgets/nool_logo.dart';
 import '../widgets/nool_lottie.dart';
-import 'location_gate_screen.dart';
+import 'forgot_password_screen.dart';
+import 'layout_manager.dart';
 import 'sign_up_screen.dart';
 
 /// Neo-brutalist Giriş Yap — Google / Apple / e-posta.
@@ -18,14 +23,10 @@ class SignInScreen extends StatefulWidget {
   const SignInScreen({
     super.key,
     this.popOnSuccess = false,
-    this.gateMode = false,
   });
 
   /// Shell içinden açıldıysa true — LayoutManager'a replace etmez, pop eder.
   final bool popOnSuccess;
-
-  /// Splash/intro sonrası zorunlu giriş — geri ile uygulamaya sızılmaz.
-  final bool gateMode;
 
   @override
   State<SignInScreen> createState() => _SignInScreenState();
@@ -76,16 +77,20 @@ class _SignInScreenState extends State<SignInScreen>
       return;
     }
 
+    final username = AuthService().displayName ??
+        await OnboardingService.getUsername() ??
+        AppStrings.fromSettings().anonymousHandle;
     if (!mounted) return;
     await Navigator.of(context).pushReplacement(
       noolRoute<void>(
-        page: const LocationGateScreen(),
+        page: LayoutManager(username: username),
         duration: const Duration(milliseconds: 480),
       ),
     );
   }
 
-  Future<void> _runSocial(Future<void> Function() action, {required bool google}) async {
+  Future<void> _runSocial(Future<void> Function() action,
+      {required bool google}) async {
     setState(() {
       _error = null;
       if (google) {
@@ -97,10 +102,8 @@ class _SignInScreenState extends State<SignInScreen>
     try {
       await action();
       await _goHome();
-    } on AuthException catch (e) {
-      if (mounted) setState(() => _error = e.message);
     } catch (e) {
-      if (mounted) setState(() => _error = e.toString());
+      if (mounted) setState(() => _error = userFacingError(e, context.s));
     } finally {
       if (mounted) {
         setState(() {
@@ -123,48 +126,30 @@ class _SignInScreenState extends State<SignInScreen>
         password: _passwordCtrl.text,
       );
       await _goHome();
-    } on AuthException catch (e) {
-      if (mounted) setState(() => _error = e.message);
     } catch (e) {
-      if (mounted) setState(() => _error = e.toString());
+      if (mounted) setState(() => _error = userFacingError(e, context.s));
     } finally {
       if (mounted) setState(() => _busyEmail = false);
     }
   }
 
-  Future<void> _forgotPassword() async {
-    final email = _emailCtrl.text.trim();
-    if (email.isEmpty || !email.contains('@')) {
-      setState(() => _error = 'Şifre sıfırlamak için önce e-postanı yaz.');
-      return;
-    }
-    try {
-      await AuthService().resetPassword(email);
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          backgroundColor: NoolColors.acid,
-          content: Text(
-            'Sıfırlama linki yolda — mailini check et.',
-            style: GoogleFonts.syne(
-              color: NoolColors.ink,
-              fontWeight: FontWeight.w700,
-            ),
-          ),
+  Future<void> _openForgotPassword() async {
+    setState(() => _error = null);
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute<void>(
+        builder: (_) => ForgotPasswordScreen(
+          initialEmail: _emailCtrl.text.trim(),
         ),
-      );
-    } on AuthException catch (e) {
-      if (mounted) setState(() => _error = e.message);
-    }
+      ),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
+    final s = context.s;
     final bottomInset = MediaQuery.viewInsetsOf(context).bottom;
 
-    return PopScope(
-      canPop: !widget.gateMode,
-      child: Scaffold(
+    return Scaffold(
       resizeToAvoidBottomInset: true,
       body: Stack(
         fit: StackFit.expand,
@@ -182,7 +167,8 @@ class _SignInScreenState extends State<SignInScreen>
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
-                        const NoolLogoMark(size: 72, border: true, shadow: true),
+                        const NoolLogoMark(
+                            size: 72, border: true, shadow: true),
                         const SizedBox(height: 18),
                         Text(
                           'NOOL',
@@ -194,20 +180,9 @@ class _SignInScreenState extends State<SignInScreen>
                             height: 1,
                           ),
                         ),
-                        if (widget.gateMode) ...[
-                          const SizedBox(height: 8),
-                          Text(
-                            'Devam etmek için giriş yap veya hesap oluştur.',
-                            style: GoogleFonts.syne(
-                              color: NoolColors.lavender,
-                              fontWeight: FontWeight.w600,
-                              fontSize: 13,
-                            ),
-                          ),
-                        ],
                         const SizedBox(height: 14),
                         Text(
-                          'Giriş Yap',
+                          s.signInTitle,
                           style: GoogleFonts.syne(
                             fontSize: 26,
                             fontWeight: FontWeight.w800,
@@ -217,7 +192,7 @@ class _SignInScreenState extends State<SignInScreen>
                         ),
                         const SizedBox(height: 8),
                         Text(
-                          'Tek tıkla kampüse bağlan. FaceID veya Google — form doldurma yok.',
+                          s.signInSubtitle,
                           style: GoogleFonts.syne(
                             fontSize: 15,
                             fontWeight: FontWeight.w500,
@@ -227,7 +202,7 @@ class _SignInScreenState extends State<SignInScreen>
                         ),
                         const SizedBox(height: 28),
                         AuthSocialButton(
-                          label: 'Google ile devam et',
+                          label: s.continueWithGoogle,
                           background: NoolColors.acid,
                           foreground: NoolColors.ink,
                           icon: Icons.g_mobiledata_rounded,
@@ -241,41 +216,49 @@ class _SignInScreenState extends State<SignInScreen>
                                     google: true,
                                   ),
                         ),
-                        const SizedBox(height: 12),
-                        AuthSocialButton(
-                          label: 'Apple ile devam et',
-                          background: NoolColors.white,
-                          foreground: NoolColors.ink,
-                          icon: Icons.apple,
-                          loading: _busyApple,
-                          onPressed: (_busyGoogle || _busyApple || _busyEmail)
-                              ? null
-                              : () => _runSocial(
-                                    () async {
-                                      await AuthService().signInWithApple();
-                                    },
-                                    google: false,
-                                  ),
-                        ),
+                        // Sign in with Apple: paid Apple Developer +
+                        // Runner.entitlements `applesignin` gerekir. Personal
+                        // team’de kapalı — Program’a geçince bu bloğu aç.
+                        // ignore: dead_code
+                        if (false && !kIsWeb && Platform.isIOS) ...[
+                          const SizedBox(height: 12),
+                          AuthSocialButton(
+                            label: s.continueWithApple,
+                            background: NoolColors.white,
+                            foreground: NoolColors.ink,
+                            icon: Icons.apple,
+                            loading: _busyApple,
+                            onPressed: (_busyGoogle || _busyApple || _busyEmail)
+                                ? null
+                                : () => _runSocial(
+                                      () async {
+                                        await AuthService().signInWithApple();
+                                      },
+                                      google: false,
+                                    ),
+                          ),
+                        ],
                         const SizedBox(height: 28),
-                        const _AuthDivider(label: 'veya e-posta'),
+                        _AuthDivider(label: s.orEmailDivider),
                         const SizedBox(height: 20),
                         AuthBrutalField(
                           controller: _emailCtrl,
-                          label: 'E-posta',
+                          label: s.emailLabel,
                           keyboardType: TextInputType.emailAddress,
                           validator: (v) {
                             if (v == null || v.trim().isEmpty) {
-                              return 'E-posta lazım';
+                              return s.forgotPasswordNeedEmail;
                             }
-                            if (!v.contains('@')) return 'Geçerli bir e-posta yaz';
+                            if (!v.contains('@')) {
+                              return s.forgotPasswordInvalidEmail;
+                            }
                             return null;
                           },
                         ),
                         const SizedBox(height: 12),
                         AuthBrutalField(
                           controller: _passwordCtrl,
-                          label: 'Şifre',
+                          label: s.passwordLabel,
                           obscureText: _obscure,
                           suffix: IconButton(
                             onPressed: () =>
@@ -289,7 +272,7 @@ class _SignInScreenState extends State<SignInScreen>
                           ),
                           validator: (v) {
                             if (v == null || v.length < 6) {
-                              return 'En az 6 karakter';
+                              return s.resetPasswordTooShort;
                             }
                             return null;
                           },
@@ -297,12 +280,16 @@ class _SignInScreenState extends State<SignInScreen>
                         Align(
                           alignment: Alignment.centerRight,
                           child: TextButton(
-                            onPressed: _forgotPassword,
+                            onPressed: _busyEmail || _busyGoogle || _busyApple
+                                ? null
+                                : _openForgotPassword,
                             child: Text(
-                              'Şifremi unuttum',
+                              s.forgotPassword,
                               style: GoogleFonts.syne(
                                 color: NoolColors.lavender,
-                                fontWeight: FontWeight.w600,
+                                fontWeight: FontWeight.w700,
+                                decoration: TextDecoration.underline,
+                                decorationColor: NoolColors.lavender,
                               ),
                             ),
                           ),
@@ -329,7 +316,7 @@ class _SignInScreenState extends State<SignInScreen>
                                   : _signInEmail,
                               child: _busyEmail
                                   ? const AuthAcidLoader()
-                                  : const Text('GİRİŞ YAP'),
+                                  : Text(s.signInCta),
                             ),
                           ),
                         ),
@@ -340,7 +327,6 @@ class _SignInScreenState extends State<SignInScreen>
                               MaterialPageRoute<bool>(
                                 builder: (_) => SignUpScreen(
                                   popOnSuccess: widget.popOnSuccess,
-                                  gateMode: widget.gateMode,
                                 ),
                               ),
                             );
@@ -378,7 +364,6 @@ class _SignInScreenState extends State<SignInScreen>
           ),
         ],
       ),
-    ),
     );
   }
 }
@@ -405,7 +390,7 @@ class _AuthDivider extends StatelessWidget {
   Widget build(BuildContext context) {
     return Row(
       children: [
-        Expanded(child: Container(height: 3, color: NoolColors.ink)),
+        Expanded(child: Container(height: 3, color: NoolColors.lavender)),
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 12),
           child: Text(
@@ -417,7 +402,7 @@ class _AuthDivider extends StatelessWidget {
             ),
           ),
         ),
-        Expanded(child: Container(height: 3, color: NoolColors.ink)),
+        Expanded(child: Container(height: 3, color: NoolColors.lavender)),
       ],
     );
   }
@@ -522,7 +507,7 @@ class AuthBrutalField extends StatelessWidget {
               labelText: label,
               labelStyle: GoogleFonts.syne(color: NoolColors.lavender),
               filled: true,
-              fillColor: NoolColors.lavender.withOpacity(0.12),
+              fillColor: NoolColors.lavender.withValues(alpha: 0.12),
               suffixIcon: suffix,
               contentPadding: const EdgeInsets.symmetric(
                 horizontal: 16,
@@ -530,7 +515,10 @@ class AuthBrutalField extends StatelessWidget {
               ),
               enabledBorder: OutlineInputBorder(
                 borderRadius: BorderRadius.circular(2),
-                borderSide: const BorderSide(color: NoolColors.ink, width: 3),
+                borderSide: const BorderSide(
+                  color: NoolColors.lavender,
+                  width: 3,
+                ),
               ),
               focusedBorder: OutlineInputBorder(
                 borderRadius: BorderRadius.circular(2),

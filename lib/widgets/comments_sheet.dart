@@ -1,19 +1,22 @@
 import 'dart:async';
+import 'dart:ui';
 
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:uuid/uuid.dart';
 
 import '../models/comment_item.dart';
-import '../services/auth_service.dart';
 import '../services/onboarding_service.dart';
 import '../services/profanity_filter.dart';
 import '../services/profile_service.dart';
 import '../services/supabase_service.dart';
 import '../icons/nool_emojis.dart';
 import '../icons/nool_icons.dart';
+import '../l10n/app_strings.dart';
 import '../theme/colors.dart';
+import '../utils/user_error.dart';
 import '../screens/other_profile_screen.dart';
+import '../widgets/nool_avatar.dart';
 import '../widgets/nool_lottie.dart';
 
 /// Alttan açılan canlı yorum paneli.
@@ -53,7 +56,6 @@ class _CommentsSheetState extends State<CommentsSheet> {
 
   StreamSubscription<List<CommentItem>>? _subscription;
   List<CommentItem> _comments = const [];
-  Set<String> _blockedUsernames = const {};
   bool _loading = true;
   bool _sending = false;
   bool _offlineMode = false;
@@ -88,29 +90,14 @@ class _CommentsSheetState extends State<CommentsSheet> {
       return;
     }
 
-    if (AuthService().isSignedIn) {
-      try {
-        _blockedUsernames = await ProfileService().blockedUsernameKeys();
-      } catch (_) {
-        _blockedUsernames = const {};
-      }
-    }
-
     try {
       await _subscription?.cancel();
       _subscription = supabase.watchComments(widget.videoId).listen(
-        (items) {
+        (items) async {
+          final enriched = await _enrichCommentAvatars(items);
           if (!mounted) return;
-          final visible = items
-              .where(
-                (c) => !ProfileService.usernameMatchesBlocked(
-                  c.username,
-                  _blockedUsernames,
-                ),
-              )
-              .toList(growable: false);
           setState(() {
-            _comments = visible;
+            _comments = enriched;
             _loading = false;
             _error = null;
           });
@@ -142,6 +129,25 @@ class _CommentsSheetState extends State<CommentsSheet> {
         curve: Curves.easeOut,
       );
     });
+  }
+
+  Future<List<CommentItem>> _enrichCommentAvatars(
+    List<CommentItem> items,
+  ) async {
+    if (items.isEmpty) return items;
+    try {
+      final urls = await ProfileService().avatarUrlsForUsernames(
+        items.map((e) => e.username),
+      );
+      if (urls.isEmpty) return items;
+      return items
+          .map(
+            (c) => c.copyWith(avatarUrl: urls[c.username] ?? c.avatarUrl),
+          )
+          .toList(growable: false);
+    } catch (_) {
+      return items;
+    }
   }
 
   void _flashFilterWarning() {
@@ -204,7 +210,7 @@ class _CommentsSheetState extends State<CommentsSheet> {
         SnackBar(
           backgroundColor: NoolColors.tangerine,
           content: Text(
-            'Gönderilemedi: $e',
+            userFacingError(e, AppStrings.of(context)),
             style: const TextStyle(
               color: NoolColors.ink,
               fontWeight: FontWeight.w700,
@@ -223,87 +229,95 @@ class _CommentsSheetState extends State<CommentsSheet> {
 
     return Align(
       alignment: Alignment.bottomCenter,
-      child: Container(
-        height: height,
-        width: double.infinity,
-        decoration: BoxDecoration(
-          color: NoolColors.night.withOpacity(0.97),
-          borderRadius: const BorderRadius.vertical(top: Radius.circular(18)),
-          border: Border.all(color: Colors.white.withOpacity(0.12), width: 1.2),
-        ),
-        child: Column(
-          children: [
-            const SizedBox(height: 10),
-            Container(
-              width: 44,
-              height: 4,
-              decoration: BoxDecoration(
-                color: NoolColors.lavender.withOpacity(0.7),
-                borderRadius: BorderRadius.circular(99),
-              ),
+      child: ClipRRect(
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(18)),
+        child: BackdropFilter(
+          filter: ImageFilter.blur(sigmaX: 22, sigmaY: 22),
+          child: Container(
+            height: height,
+            width: double.infinity,
+            decoration: BoxDecoration(
+              color: NoolColors.night.withValues(alpha: 0.82),
+              borderRadius:
+                  const BorderRadius.vertical(top: Radius.circular(18)),
+              border: Border.all(
+                  color: Colors.white.withValues(alpha: 0.12), width: 1.2),
             ),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(18, 14, 18, 8),
-              child: Row(
-                children: [
-                  Text(
-                    'Yorumlar',
-                    style: GoogleFonts.syne(
-                      color: NoolColors.white,
-                      fontWeight: FontWeight.w800,
-                      fontSize: 20,
-                    ),
+            child: Column(
+              children: [
+                const SizedBox(height: 10),
+                Container(
+                  width: 44,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: NoolColors.lavender.withValues(alpha: 0.7),
+                    borderRadius: BorderRadius.circular(99),
                   ),
-                  const SizedBox(width: 8),
-                  Text(
-                    '${_comments.length}',
-                    style: GoogleFonts.syne(
-                      color: NoolColors.acid,
-                      fontWeight: FontWeight.w700,
-                      fontSize: 16,
-                    ),
-                  ),
-                  const Spacer(),
-                  if (_offlineMode)
-                    Text(
-                      'offline demo',
-                      style: GoogleFonts.syne(
-                        color: NoolColors.lavender,
-                        fontSize: 11,
-                        fontWeight: FontWeight.w600,
+                ),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(18, 14, 18, 8),
+                  child: Row(
+                    children: [
+                      Text(
+                        'Yorumlar',
+                        style: GoogleFonts.syne(
+                          color: NoolColors.white,
+                          fontWeight: FontWeight.w800,
+                          fontSize: 20,
+                        ),
                       ),
-                    ),
-                ],
-              ),
-            ),
-            Expanded(child: _buildList()),
-            if (_filterWarning != null) _FilterBanner(message: _filterWarning!),
-            NoolEmojiPicker(
-              size: 28,
-              onSelected: (emoji) {
-                final c = _inputController;
-                final text = c.text;
-                final sel = c.selection;
-                final insertAt =
-                    sel.isValid ? sel.start : text.length;
-                final next =
-                    text.replaceRange(insertAt, insertAt, emoji.token);
-                c.value = TextEditingValue(
-                  text: next,
-                  selection: TextSelection.collapsed(
-                    offset: insertAt + emoji.token.length,
+                      const SizedBox(width: 8),
+                      Text(
+                        '${_comments.length}',
+                        style: GoogleFonts.syne(
+                          color: NoolColors.acid,
+                          fontWeight: FontWeight.w700,
+                          fontSize: 16,
+                        ),
+                      ),
+                      const Spacer(),
+                      if (_offlineMode)
+                        Text(
+                          'offline demo',
+                          style: GoogleFonts.syne(
+                            color: NoolColors.lavender,
+                            fontSize: 11,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                    ],
                   ),
-                );
-                _focusNode.requestFocus();
-              },
+                ),
+                Expanded(child: _buildList()),
+                if (_filterWarning != null)
+                  _FilterBanner(message: _filterWarning!),
+                NoolEmojiPicker(
+                  size: 28,
+                  onSelected: (emoji) {
+                    final c = _inputController;
+                    final text = c.text;
+                    final sel = c.selection;
+                    final insertAt = sel.isValid ? sel.start : text.length;
+                    final next =
+                        text.replaceRange(insertAt, insertAt, emoji.token);
+                    c.value = TextEditingValue(
+                      text: next,
+                      selection: TextSelection.collapsed(
+                        offset: insertAt + emoji.token.length,
+                      ),
+                    );
+                    _focusNode.requestFocus();
+                  },
+                ),
+                _Composer(
+                  controller: _inputController,
+                  focusNode: _focusNode,
+                  sending: _sending,
+                  onSend: _submit,
+                ),
+              ],
             ),
-            _Composer(
-              controller: _inputController,
-              focusNode: _focusNode,
-              sending: _sending,
-              onSend: _submit,
-            ),
-          ],
+          ),
         ),
       ),
     );
@@ -312,7 +326,7 @@ class _CommentsSheetState extends State<CommentsSheet> {
   Widget _buildList() {
     if (_loading) {
       return const Center(
-        child: const NoolLottieView.loading(
+        child: NoolLottieView.loading(
           width: 48,
           height: 48,
           compact: true,
@@ -336,7 +350,7 @@ class _CommentsSheetState extends State<CommentsSheet> {
     if (_comments.isEmpty) {
       return Center(
         child: Text(
-          'İlk yorumu sen bırak — pozitif kal.',
+          AppStrings.of(context).commentsEmpty,
           style: GoogleFonts.syne(
             color: NoolColors.lavender,
             fontWeight: FontWeight.w600,
@@ -356,6 +370,25 @@ class _CommentsSheetState extends State<CommentsSheet> {
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
+              GestureDetector(
+                onTap: () {
+                  Navigator.of(context).push(
+                    OtherProfileScreen.route(
+                      username: comment.username,
+                      deviceId:
+                          comment.deviceId.isEmpty ? null : comment.deviceId,
+                    ),
+                  );
+                },
+                child: NoolAvatar(
+                  size: 32,
+                  borderWidth: 2,
+                  imageUrl: comment.avatarUrl,
+                  fallbackInitial: comment.username,
+                  backgroundColor: NoolColors.acid,
+                ),
+              ),
+              const SizedBox(width: 10),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -430,7 +463,7 @@ class _FilterBanner extends StatelessWidget {
           border: Border.all(color: const Color(0xFFFF2D55), width: 2),
           boxShadow: [
             BoxShadow(
-              color: const Color(0xFFFF2D55).withOpacity(0.55),
+              color: const Color(0xFFFF2D55).withValues(alpha: 0.55),
               blurRadius: 16,
               spreadRadius: 1,
             ),
@@ -501,7 +534,7 @@ class _Composer extends StatelessWidget {
                 cursorColor: NoolColors.acid,
                 decoration: InputDecoration(
                   counterText: '',
-                  hintText: 'Yorumunu bırak…',
+                  hintText: AppStrings.of(context).commentHint,
                   hintStyle: GoogleFonts.syne(
                     color: NoolColors.lavender,
                     fontWeight: FontWeight.w500,
@@ -562,7 +595,8 @@ List<CommentItem> _demoComments(String videoId) {
       videoId: videoId,
       deviceId: 'demo',
       username: '@anon_kutuphane_hayaleti',
-      body: 'bu drop efsane ya ${NoolEmojiData.cry.token}${NoolEmojiData.fire.token}',
+      body:
+          'bu drop efsane ya ${NoolEmojiData.cry.token}${NoolEmojiData.fire.token}',
       createdAt: now.subtract(const Duration(minutes: 4)),
     ),
     CommentItem(

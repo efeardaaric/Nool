@@ -25,7 +25,7 @@ class NoolLogoMark extends StatelessWidget {
       width: size,
       height: size,
       fit: BoxFit.cover,
-      filterQuality: FilterQuality.none,
+      filterQuality: FilterQuality.medium,
     );
 
     Widget child = image;

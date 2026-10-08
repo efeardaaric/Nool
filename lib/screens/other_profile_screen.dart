@@ -5,16 +5,19 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:video_player/video_player.dart';
 
 import '../icons/nool_icons.dart';
+import '../l10n/app_strings.dart';
 import '../models/squad_models.dart';
 import '../models/user_profile.dart';
 import '../models/vibe_post.dart';
 import '../services/auth_service.dart';
-import '../services/messaging_service.dart';
 import '../services/profile_service.dart';
+import '../services/supabase_service.dart';
 import '../theme/app_theme.dart';
 import '../theme/colors.dart';
+import '../utils/user_error.dart';
+import '../widgets/nool_avatar.dart';
 import '../widgets/nool_lottie.dart';
-import 'chat_screen.dart';
+import 'direct_chat_screen.dart';
 import 'profile_screen.dart';
 import 'sign_in_screen.dart';
 
@@ -78,10 +81,8 @@ class _OtherProfileScreenState extends State<OtherProfileScreen> {
 
   bool _loading = true;
   bool _squadBusy = false;
-  bool _messageBusy = false;
-  bool _blockBusy = false;
-  bool _iBlockedThem = false;
-  bool _eitherBlocked = false;
+  bool _dmBusy = false;
+  bool _isBlocked = false;
   String? _error;
 
   @override
@@ -123,37 +124,41 @@ class _OtherProfileScreenState extends State<OtherProfileScreen> {
         return;
       }
 
+      final blocked = SupabaseService.instance.isProfileBlocked(
+        userId: profile?.id ?? widget.userId,
+        username: profile?.username ?? widget.username,
+      );
+      if (blocked) {
+        if (!mounted) return;
+        setState(() {
+          _profile = profile;
+          _isBlocked = true;
+          _drops = const [];
+          _totalVibes = 0;
+          _loading = false;
+        });
+        return;
+      }
+
       final lookupName = profile?.username ?? widget.username;
-      var drops = <VibePost>[];
-      var vibes = 0;
+      final drops = await ProfileService().getUploadedVideosForUser(
+        username: lookupName,
+        deviceId: widget.deviceId,
+      );
+      final vibes = drops.fold<int>(0, (s, p) => s + p.vibeCount);
 
       var status = SquadConnectionStatus.notConnected;
       String? requestId;
-      var iBlocked = false;
-      var eitherBlocked = false;
       final otherId = profile?.id ?? widget.userId;
       if (AuthService().isSignedIn && otherId != null) {
-        eitherBlocked = await ProfileService().areUsersBlocked(otherId);
-        iBlocked = await ProfileService().haveIBlocked(otherId);
-        if (!eitherBlocked) {
-          status = await ProfileService().getSquadStatus(otherId);
-          if (status == SquadConnectionStatus.rejected) {
-            status = SquadConnectionStatus.notConnected;
-          }
-          final edge = await ProfileService().findSquadWith(otherId);
-          if (edge != null && edge.status == 'pending') {
-            requestId = edge.id;
-          }
+        status = await ProfileService().getSquadStatus(otherId);
+        if (status == SquadConnectionStatus.rejected) {
+          status = SquadConnectionStatus.notConnected;
         }
-      }
-
-      // Engelli çiftlerde drop içeriği yüklenmez / gösterilmez.
-      if (!eitherBlocked) {
-        drops = await ProfileService().getUploadedVideosForUser(
-          username: lookupName,
-          deviceId: widget.deviceId,
-        );
-        vibes = drops.fold<int>(0, (s, p) => s + p.vibeCount);
+        final edge = await ProfileService().findSquadWith(otherId);
+        if (edge != null && edge.status == 'pending') {
+          requestId = edge.id;
+        }
       }
 
       if (!mounted) return;
@@ -163,21 +168,22 @@ class _OtherProfileScreenState extends State<OtherProfileScreen> {
         _totalVibes = vibes;
         _squadStatus = status;
         _pendingRequestId = requestId;
-        _iBlockedThem = iBlocked;
-        _eitherBlocked = eitherBlocked;
+        _isBlocked = false;
         _loading = false;
       });
     } catch (e) {
       if (!mounted) return;
       setState(() {
         _loading = false;
-        _error = e.toString();
+        _error = userFacingError(e, context.s);
       });
     }
   }
 
-  Future<void> _onSquadTap() async {
-    if (_squadBusy || _eitherBlocked) return;
+  Future<void> _onMessageTap() async {
+    if (_dmBusy || _isBlocked) return;
+    final otherId = _resolvedUserId;
+    if (otherId == null || otherId.isEmpty) return;
 
     if (!AuthService().isSignedIn) {
       final go = await showDialog<bool>(
@@ -196,7 +202,88 @@ class _OtherProfileScreenState extends State<OtherProfileScreen> {
             ),
           ),
           content: Text(
-            'Squad Up için hesabını güvenceye al.',
+            context.s.friendNeedAccountDm,
+            style: GoogleFonts.syne(color: NoolColors.lavender),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: Text(
+                'Vazgeç',
+                style: GoogleFonts.syne(color: NoolColors.lavender),
+              ),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: Text(
+                'Giriş',
+                style: GoogleFonts.syne(
+                  color: NoolColors.acid,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+      if (go == true && mounted) {
+        await Navigator.of(context).push(
+          MaterialPageRoute<void>(builder: (_) => const SignInScreen()),
+        );
+      }
+      return;
+    }
+
+    setState(() => _dmBusy = true);
+    try {
+      await DirectChatScreen.openWithUser(
+        context,
+        otherUserId: otherId,
+        otherUsername: _profile?.username ?? widget.username,
+        otherAvatarUrl: _profile?.avatarUrl,
+      );
+    } catch (e, st) {
+      debugPrint('OtherProfileScreen._onMessageTap: $e\n$st');
+      if (!mounted) return;
+      final message = e is StateError ? e.message : context.s.dmOpenFailed;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          backgroundColor: NoolColors.tangerine,
+          content: Text(
+            message,
+            style: GoogleFonts.syne(
+              color: NoolColors.ink,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+        ),
+      );
+    } finally {
+      if (mounted) setState(() => _dmBusy = false);
+    }
+  }
+
+  Future<void> _onSquadTap() async {
+    if (_squadBusy) return;
+
+    if (!AuthService().isSignedIn) {
+      final go = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          backgroundColor: NoolColors.night,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(4),
+            side: const BorderSide(color: NoolColors.acid, width: 3),
+          ),
+          title: Text(
+            'Önce giriş',
+            style: GoogleFonts.syne(
+              color: NoolColors.acid,
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+          content: Text(
+            context.s.friendNeedAccountAdd,
             style: GoogleFonts.syne(color: NoolColors.white),
           ),
           actions: [
@@ -231,18 +318,7 @@ class _OtherProfileScreenState extends State<OtherProfileScreen> {
 
     final otherId = _resolvedUserId;
     if (otherId == null) {
-      _toast('Bu anon henüz kayıtlı profil bağlamamış.');
-      return;
-    }
-
-    if (await ProfileService().areUsersBlocked(otherId)) {
-      _toast('Bu kullanıcıyla etkileşim engellendi.');
-      if (mounted) {
-        setState(() {
-          _eitherBlocked = true;
-          _squadStatus = SquadConnectionStatus.notConnected;
-        });
-      }
+      _toast(context.s.anonymousNoLinkedProfile);
       return;
     }
 
@@ -251,12 +327,13 @@ class _OtherProfileScreenState extends State<OtherProfileScreen> {
       switch (_squadStatus) {
         case SquadConnectionStatus.notConnected:
         case SquadConnectionStatus.rejected:
-          await ProfileService().sendSquadRequest(otherId);
+          final edge = await ProfileService().sendSquadRequest(otherId);
           if (!mounted) return;
           setState(() {
             _squadStatus = SquadConnectionStatus.pendingSent;
+            _pendingRequestId = edge.id;
           });
-          _toast('Squad isteği yolda.');
+          _toast(context.s.friendPendingSent);
         case SquadConnectionStatus.pendingReceived:
           final id = _pendingRequestId;
           if (id == null) {
@@ -268,204 +345,98 @@ class _OtherProfileScreenState extends State<OtherProfileScreen> {
           }
           if (!mounted) return;
           setState(() => _squadStatus = SquadConnectionStatus.accepted);
-          _toast('Squad kuruldu. Chaos together.');
+          _toast(context.s.friendAcceptedToast);
         case SquadConnectionStatus.pendingSent:
+          final id = _pendingRequestId ??
+              (await ProfileService().findSquadWith(otherId))?.id;
+          if (id != null) {
+            await ProfileService().cancelSquadRequest(id);
+            if (!mounted) return;
+            setState(() {
+              _squadStatus = SquadConnectionStatus.notConnected;
+              _pendingRequestId = null;
+            });
+            _toast(context.s.friendCancelledToast);
+          }
         case SquadConnectionStatus.accepted:
-          break;
+          final confirm = await showDialog<bool>(
+            context: context,
+            builder: (ctx) => AlertDialog(
+              backgroundColor: NoolColors.night,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(4),
+                side: const BorderSide(color: NoolColors.tangerine, width: 3),
+              ),
+              title: Text(
+                context.s.friendUnfriend,
+                style: GoogleFonts.syne(
+                  color: NoolColors.tangerine,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(ctx, false),
+                  child: Text(
+                    'Vazgeç',
+                    style: GoogleFonts.syne(color: NoolColors.lavender),
+                  ),
+                ),
+                TextButton(
+                  onPressed: () => Navigator.pop(ctx, true),
+                  child: Text(
+                    context.s.friendUnfriend,
+                    style: GoogleFonts.syne(
+                      color: NoolColors.tangerine,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          );
+          if (confirm == true) {
+            await ProfileService().removeFriend(otherId);
+            if (!mounted) return;
+            setState(() {
+              _squadStatus = SquadConnectionStatus.notConnected;
+              _pendingRequestId = null;
+            });
+            _toast(context.s.friendRemovedToast);
+          }
       }
     } catch (e) {
-      _toast('Squad işlemi başarısız: $e');
+      if (!mounted) return;
+      _toast(userFacingError(e, context.s));
     } finally {
       if (mounted) setState(() => _squadBusy = false);
     }
   }
 
   Future<void> _onRejectTap() async {
-    if (_squadBusy || _eitherBlocked) return;
+    if (_squadBusy || _squadStatus != SquadConnectionStatus.pendingReceived) {
+      return;
+    }
     final otherId = _resolvedUserId;
     if (otherId == null) return;
 
     setState(() => _squadBusy = true);
     try {
-      final id = _pendingRequestId;
-      final edgeId = id ??
+      final id = _pendingRequestId ??
           (await ProfileService().findSquadWith(otherId))?.id;
-      if (edgeId == null) throw StateError('İstek bulunamadı.');
-      await ProfileService().rejectSquadRequest(edgeId);
+      if (id == null) throw StateError('İstek bulunamadı.');
+      await ProfileService().rejectSquadRequest(id);
       if (!mounted) return;
       setState(() {
         _squadStatus = SquadConnectionStatus.notConnected;
         _pendingRequestId = null;
       });
-      _toast('İstek reddedildi.');
+      _toast(context.s.friendRejectedToast);
     } catch (e) {
-      _toast('Reddetme başarısız: $e');
+      if (!mounted) return;
+      _toast(userFacingError(e, context.s));
     } finally {
       if (mounted) setState(() => _squadBusy = false);
-    }
-  }
-
-  Future<void> _onMessageTap() async {
-    if (_messageBusy || _eitherBlocked) return;
-
-    if (!AuthService().isSignedIn) {
-      _toast('Mesaj için giriş yap.');
-      return;
-    }
-
-    final otherId = _resolvedUserId;
-    if (otherId == null) {
-      _toast('Bu anon henüz kayıtlı profil bağlamamış.');
-      return;
-    }
-
-    if (await ProfileService().areUsersBlocked(otherId)) {
-      _toast('Bu kullanıcıyla mesajlaşma engellendi.');
-      if (mounted) setState(() => _eitherBlocked = true);
-      return;
-    }
-
-    setState(() => _messageBusy = true);
-    try {
-      final preview = await MessagingService().openDmWith(
-        otherUserId: otherId,
-        otherUsername: _displayName,
-        otherAvatarUrl: _profile?.avatarUrl,
-      );
-      if (!mounted) return;
-      await Navigator.of(context).push(ChatScreen.route(preview: preview));
-    } catch (e) {
-      _toast('Sohbet açılamadı: $e');
-    } finally {
-      if (mounted) setState(() => _messageBusy = false);
-    }
-  }
-
-  Future<void> _toggleBlock() async {
-    if (_blockBusy) return;
-
-    if (!AuthService().isSignedIn) {
-      _toast('Engellemek için giriş yap.');
-      return;
-    }
-
-    final otherId = _resolvedUserId;
-    if (otherId == null) {
-      _toast('Bu anon henüz kayıtlı profil bağlamamış.');
-      return;
-    }
-
-    if (_iBlockedThem) {
-      final confirmed = await showDialog<bool>(
-        context: context,
-        builder: (ctx) => AlertDialog(
-          backgroundColor: NoolColors.night,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(4),
-            side: const BorderSide(color: NoolColors.acid, width: 3),
-          ),
-          title: Text(
-            'Engeli kaldır?',
-            style: GoogleFonts.syne(
-              color: NoolColors.acid,
-              fontWeight: FontWeight.w800,
-            ),
-          ),
-          content: Text(
-            '$_displayName ile tekrar etkileşim kurabilirsin.',
-            style: GoogleFonts.syne(color: NoolColors.white, height: 1.4),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(ctx, false),
-              child: Text(
-                'Vazgeç',
-                style: GoogleFonts.syne(color: NoolColors.lavender),
-              ),
-            ),
-            TextButton(
-              onPressed: () => Navigator.pop(ctx, true),
-              child: Text(
-                'Kaldır',
-                style: GoogleFonts.syne(
-                  color: NoolColors.acid,
-                  fontWeight: FontWeight.w800,
-                ),
-              ),
-            ),
-          ],
-        ),
-      );
-      if (confirmed != true || !mounted) return;
-
-      setState(() => _blockBusy = true);
-      try {
-        await ProfileService().unblockUser(otherId);
-        if (!mounted) return;
-        _toast('Engel kaldırıldı.');
-        await _load();
-      } catch (e) {
-        _toast('Engel kaldırılamadı: $e');
-      } finally {
-        if (mounted) setState(() => _blockBusy = false);
-      }
-      return;
-    }
-
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: NoolColors.night,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(4),
-          side: const BorderSide(color: NoolColors.tangerine, width: 3),
-        ),
-        title: Text(
-          'Engelle?',
-          style: GoogleFonts.syne(
-            color: NoolColors.tangerine,
-            fontWeight: FontWeight.w800,
-          ),
-        ),
-        content: Text(
-          '$_displayName engellenecek. Drop’ları, yorumları ve mesajları '
-          'gizlenir; squad / DM kesilir.',
-          style: GoogleFonts.syne(color: NoolColors.white, height: 1.4),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: Text(
-              'Vazgeç',
-              style: GoogleFonts.syne(color: NoolColors.lavender),
-            ),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, true),
-            child: Text(
-              'ENGELLE',
-              style: GoogleFonts.syne(
-                color: NoolColors.tangerine,
-                fontWeight: FontWeight.w800,
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-
-    if (confirmed != true || !mounted) return;
-
-    setState(() => _blockBusy = true);
-    try {
-      await ProfileService().blockUser(otherId);
-      if (!mounted) return;
-      _toast('Kullanıcı engellendi.');
-      await _load();
-    } catch (e) {
-      _toast('Engellenemedi: $e');
-    } finally {
-      if (mounted) setState(() => _blockBusy = false);
     }
   }
 
@@ -552,31 +523,6 @@ class _OtherProfileScreenState extends State<OtherProfileScreen> {
                             letterSpacing: 1.2,
                           ),
                         ),
-                        if (!_loading && _error == null) ...[
-                          const SizedBox(width: 4),
-                          IconButton(
-                            onPressed: _blockBusy ? null : _toggleBlock,
-                            tooltip: _iBlockedThem
-                                ? 'Engeli kaldır'
-                                : 'Engelle',
-                            icon: _blockBusy
-                                ? const SizedBox(
-                                    width: 18,
-                                    height: 18,
-                                    child: CircularProgressIndicator(
-                                      strokeWidth: 2,
-                                      color: NoolColors.tangerine,
-                                    ),
-                                  )
-                                : NoolIcon(
-                                    _iBlockedThem
-                                        ? NoolIconData.close
-                                        : NoolIconData.flag,
-                                    color: NoolColors.tangerine,
-                                    size: 20,
-                                  ),
-                          ),
-                        ],
                       ],
                     ),
                   ),
@@ -604,224 +550,197 @@ class _OtherProfileScreenState extends State<OtherProfileScreen> {
                       ),
                     ),
                   )
-                else ...[
-                  SliverToBoxAdapter(child: _buildStatusCard()),
-                  if (_eitherBlocked)
-                    SliverToBoxAdapter(
+                else if (_isBlocked)
+                  SliverFillRemaining(
+                    hasScrollBody: false,
+                    child: Center(
                       child: Padding(
-                        padding: const EdgeInsets.fromLTRB(24, 8, 24, 20),
-                        child: Column(
-                          children: [
-                            Text(
-                              _iBlockedThem
-                                  ? 'Bu kullanıcıyı engelledin.'
-                                  : 'Bu kullanıcıyla etkileşim engellenmiş.',
-                              textAlign: TextAlign.center,
-                              style: GoogleFonts.syne(
-                                color: NoolColors.tangerine,
-                                fontWeight: FontWeight.w700,
+                        padding: const EdgeInsets.all(28),
+                        child: Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.fromLTRB(20, 24, 20, 20),
+                          decoration: BoxDecoration(
+                            color: NoolColors.night,
+                            border: Border.all(color: NoolColors.ink, width: 3),
+                            boxShadow: const [
+                              BoxShadow(
+                                color: NoolColors.ink,
+                                offset: Offset(4, 4),
+                                blurRadius: 0,
                               ),
-                            ),
-                            if (_iBlockedThem) ...[
-                              const SizedBox(height: 12),
-                              BrutalShadow(
-                                offset: const Offset(4, 4),
-                                child: SizedBox(
-                                  width: double.infinity,
-                                  height: 48,
-                                  child: ElevatedButton(
-                                    onPressed:
-                                        _blockBusy ? null : _toggleBlock,
-                                    child: Text(
-                                      _blockBusy
-                                          ? '...'
-                                          : 'ENGELİ KALDIR',
-                                      style: GoogleFonts.syne(
-                                        fontWeight: FontWeight.w800,
+                            ],
+                          ),
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              const Icon(
+                                Icons.block,
+                                color: NoolColors.tangerine,
+                                size: 40,
+                              ),
+                              const SizedBox(height: 14),
+                              Text(
+                                context.s.profileBlockedTitle,
+                                textAlign: TextAlign.center,
+                                style: GoogleFonts.syne(
+                                  color: NoolColors.acid,
+                                  fontWeight: FontWeight.w800,
+                                  fontSize: 20,
+                                ),
+                              ),
+                              const SizedBox(height: 8),
+                              Text(
+                                context.s.profileBlockedBody,
+                                textAlign: TextAlign.center,
+                                style: GoogleFonts.syne(
+                                  color: NoolColors.lavender,
+                                  fontWeight: FontWeight.w500,
+                                  fontSize: 14,
+                                ),
+                              ),
+                              const SizedBox(height: 18),
+                              SizedBox(
+                                width: double.infinity,
+                                child: Material(
+                                  color: NoolColors.acid,
+                                  child: InkWell(
+                                    onTap: () =>
+                                        Navigator.of(context).maybePop(),
+                                    child: Container(
+                                      padding: const EdgeInsets.symmetric(
+                                        vertical: 14,
+                                      ),
+                                      decoration: BoxDecoration(
+                                        border: Border.all(
+                                          color: NoolColors.ink,
+                                          width: 3,
+                                        ),
+                                      ),
+                                      child: Text(
+                                        context.s.goBack,
+                                        textAlign: TextAlign.center,
+                                        style: GoogleFonts.syne(
+                                          color: NoolColors.ink,
+                                          fontWeight: FontWeight.w800,
+                                        ),
                                       ),
                                     ),
                                   ),
                                 ),
                               ),
                             ],
-                          ],
-                        ),
-                      ),
-                    )
-                  else ...[
-                  SliverToBoxAdapter(
-                    child: Padding(
-                      padding: const EdgeInsets.fromLTRB(24, 8, 24, 8),
-                      child: _SquadUpButton(
-                        status: _squadStatus,
-                        busy: _squadBusy,
-                        onPressed: _onSquadTap,
-                      ),
-                    ),
-                  ),
-                  if (_squadStatus == SquadConnectionStatus.pendingReceived)
-                    SliverToBoxAdapter(
-                      child: Padding(
-                        padding: const EdgeInsets.fromLTRB(24, 0, 24, 8),
-                        child: BrutalShadow(
-                          offset: const Offset(4, 4),
-                          child: Material(
-                            color: NoolColors.night,
-                            child: InkWell(
-                              onTap: _squadBusy ? null : _onRejectTap,
-                              child: Container(
-                                width: double.infinity,
-                                padding: const EdgeInsets.symmetric(
-                                  vertical: 14,
-                                ),
-                                decoration: BoxDecoration(
-                                  border: Border.all(
-                                    color: NoolColors.tangerine,
-                                    width: 3,
-                                  ),
-                                ),
-                                child: Text(
-                                  'Reddet',
-                                  textAlign: TextAlign.center,
-                                  style: GoogleFonts.syne(
-                                    color: NoolColors.tangerine,
-                                    fontWeight: FontWeight.w800,
-                                    fontSize: 14,
-                                  ),
-                                ),
-                              ),
-                            ),
                           ),
                         ),
                       ),
                     ),
-                  if (_squadStatus == SquadConnectionStatus.accepted)
-                    SliverToBoxAdapter(
-                      child: Padding(
-                        padding: const EdgeInsets.fromLTRB(24, 0, 24, 20),
-                        child: BrutalShadow(
-                          offset: const Offset(5, 5),
-                          child: Material(
-                            color: NoolColors.lavender,
-                            child: InkWell(
-                              onTap: _messageBusy ? null : _onMessageTap,
-                              child: Container(
-                                width: double.infinity,
-                                padding: const EdgeInsets.symmetric(
-                                  vertical: 16,
-                                  horizontal: 12,
-                                ),
-                                decoration: BoxDecoration(
-                                  border: Border.all(
-                                    color: NoolColors.ink,
-                                    width: 3,
+                  )
+                else ...[
+                  SliverToBoxAdapter(child: _buildStatusCard()),
+                  SliverToBoxAdapter(
+                    child: Padding(
+                      padding: const EdgeInsets.fromLTRB(24, 8, 24, 20),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          _MessageCtaButton(
+                            busy: _dmBusy,
+                            onPressed: _onMessageTap,
+                          ),
+                          const SizedBox(height: 10),
+                          _SquadUpButton(
+                            status: _squadStatus,
+                            busy: _squadBusy,
+                            onPressed: _onSquadTap,
+                          ),
+                          if (_squadStatus ==
+                              SquadConnectionStatus.pendingReceived) ...[
+                            const SizedBox(height: 10),
+                            BrutalShadow(
+                              offset: const Offset(5, 5),
+                              child: Material(
+                                color: NoolColors.lavender,
+                                child: InkWell(
+                                  onTap: _squadBusy ? null : _onRejectTap,
+                                  child: Container(
+                                    width: double.infinity,
+                                    padding: const EdgeInsets.symmetric(
+                                      vertical: 14,
+                                      horizontal: 12,
+                                    ),
+                                    decoration: BoxDecoration(
+                                      border: Border.all(
+                                        color: NoolColors.ink,
+                                        width: 3,
+                                      ),
+                                    ),
+                                    child: Text(
+                                      context.s.friendReject,
+                                      textAlign: TextAlign.center,
+                                      style: GoogleFonts.syne(
+                                        color: NoolColors.ink,
+                                        fontWeight: FontWeight.w800,
+                                        fontSize: 15,
+                                      ),
+                                    ),
                                   ),
                                 ),
-                                child: _messageBusy
-                                    ? const Center(
-                                        child: NoolLottieView.loading(
-                                          width: 28,
-                                          height: 28,
-                                          compact: true,
-                                        ),
-                                      )
-                                    : Row(
-                                        mainAxisAlignment:
-                                            MainAxisAlignment.center,
-                                        children: [
-                                          const NoolIcon(
-                                            NoolIconData.send,
-                                            color: NoolColors.ink,
-                                            size: 18,
-                                          ),
-                                          const SizedBox(width: 8),
-                                          Text(
-                                            'Mesaj Gönder',
-                                            style: GoogleFonts.syne(
-                                              color: NoolColors.ink,
-                                              fontWeight: FontWeight.w800,
-                                              fontSize: 15,
-                                            ),
-                                          ),
-                                        ],
-                                      ),
                               ),
                             ),
+                          ],
+                        ],
+                      ),
+                    ),
+                  ),
+                  SliverToBoxAdapter(
+                    child: Padding(
+                      padding: const EdgeInsets.fromLTRB(20, 0, 20, 12),
+                      child: Text(
+                        'DROPS',
+                        style: GoogleFonts.syne(
+                          color: NoolColors.white,
+                          fontWeight: FontWeight.w800,
+                          fontSize: 18,
+                        ),
+                      ),
+                    ),
+                  ),
+                  if (_drops.isEmpty)
+                    SliverToBoxAdapter(
+                      child: Padding(
+                        padding: const EdgeInsets.all(32),
+                        child: Text(
+                          context.s.anonymousNoDropsToday,
+                          textAlign: TextAlign.center,
+                          style: GoogleFonts.syne(
+                            color: NoolColors.lavender,
+                            fontWeight: FontWeight.w600,
                           ),
                         ),
                       ),
                     )
                   else
-                    const SliverToBoxAdapter(child: SizedBox(height: 12)),
-                  SliverToBoxAdapter(
-                    child: Padding(
-                      padding: const EdgeInsets.fromLTRB(24, 0, 24, 12),
-                      child: TextButton(
-                        onPressed: _blockBusy ? null : _toggleBlock,
-                        child: Text(
-                          'Engelle',
-                          style: GoogleFonts.syne(
-                            color: NoolColors.tangerine,
-                            fontWeight: FontWeight.w800,
-                          ),
+                    SliverPadding(
+                      padding: const EdgeInsets.fromLTRB(16, 0, 16, 40),
+                      sliver: SliverGrid(
+                        gridDelegate:
+                            const SliverGridDelegateWithFixedCrossAxisCount(
+                          crossAxisCount: 3,
+                          mainAxisSpacing: 8,
+                          crossAxisSpacing: 8,
+                          childAspectRatio: 0.72,
+                        ),
+                        delegate: SliverChildBuilderDelegate(
+                          (context, index) {
+                            final post = _drops[index];
+                            return _OtherDropTile(
+                              post: post,
+                              onTap: () => _openDrop(post),
+                            );
+                          },
+                          childCount: _drops.length,
                         ),
                       ),
                     ),
-                  ),
-                  ],
-                  if (!_eitherBlocked) ...[
-                    // Engelli kullanıcıların drop'ları gizlenir.
-                    SliverToBoxAdapter(
-                      child: Padding(
-                        padding: const EdgeInsets.fromLTRB(20, 0, 20, 12),
-                        child: Text(
-                          'DROPS',
-                          style: GoogleFonts.syne(
-                            color: NoolColors.white,
-                            fontWeight: FontWeight.w800,
-                            fontSize: 18,
-                          ),
-                        ),
-                      ),
-                    ),
-                    if (_drops.isEmpty)
-                      SliverToBoxAdapter(
-                        child: Padding(
-                          padding: const EdgeInsets.all(32),
-                          child: Text(
-                            'Bu anon bugün henüz drop atmamış.',
-                            textAlign: TextAlign.center,
-                            style: GoogleFonts.syne(
-                              color: NoolColors.lavender,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                        ),
-                      )
-                    else
-                      SliverPadding(
-                        padding: const EdgeInsets.fromLTRB(16, 0, 16, 40),
-                        sliver: SliverGrid(
-                          gridDelegate:
-                              const SliverGridDelegateWithFixedCrossAxisCount(
-                            crossAxisCount: 3,
-                            mainAxisSpacing: 8,
-                            crossAxisSpacing: 8,
-                            childAspectRatio: 0.72,
-                          ),
-                          delegate: SliverChildBuilderDelegate(
-                            (context, index) {
-                              final post = _drops[index];
-                              return _OtherDropTile(
-                                post: post,
-                                onTap: () => _openDrop(post),
-                              );
-                            },
-                            childCount: _drops.length,
-                          ),
-                        ),
-                      ),
-                  ],
                 ],
               ],
             ),
@@ -846,30 +765,16 @@ class _OtherProfileScreenState extends State<OtherProfileScreen> {
             child: Container(
               padding: const EdgeInsets.all(18),
               decoration: BoxDecoration(
-                color: NoolColors.lavender.withOpacity(0.14),
+                color: NoolColors.lavender.withValues(alpha: 0.14),
                 border: Border.all(color: NoolColors.ink, width: 3),
               ),
               child: Column(
                 children: [
-                  Container(
-                    width: 96,
-                    height: 96,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      border: Border.all(color: NoolColors.acid, width: 4),
-                      color: NoolColors.night,
-                    ),
-                    clipBehavior: Clip.antiAlias,
-                    child: avatarUrl != null && avatarUrl.isNotEmpty
-                        ? Image.network(
-                            avatarUrl,
-                            fit: BoxFit.cover,
-                            cacheWidth: 224,
-                            cacheHeight: 224,
-                            errorBuilder: (_, __, ___) =>
-                                const _OtherAvatarFallback(),
-                          )
-                        : const _OtherAvatarFallback(),
+                  NoolAvatar(
+                    size: 96,
+                    borderWidth: 4,
+                    imageUrl: avatarUrl,
+                    fallbackIconSize: 40,
                   ),
                   const SizedBox(height: 14),
                   Text(
@@ -884,7 +789,7 @@ class _OtherProfileScreenState extends State<OtherProfileScreen> {
                   ),
                   const SizedBox(height: 8),
                   Text(
-                    bio.isEmpty ? 'Bio yok — mistik anon.' : bio,
+                    bio.isEmpty ? context.s.noBioOther : bio,
                     textAlign: TextAlign.center,
                     style: GoogleFonts.syne(
                       color: NoolColors.lavender,
@@ -944,6 +849,57 @@ class _OtherProfileScreenState extends State<OtherProfileScreen> {
   }
 }
 
+class _MessageCtaButton extends StatelessWidget {
+  const _MessageCtaButton({
+    required this.busy,
+    required this.onPressed,
+  });
+
+  final bool busy;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    return BrutalShadow(
+      offset: const Offset(5, 5),
+      child: Material(
+        color: NoolColors.tangerine,
+        child: InkWell(
+          onTap: busy ? null : onPressed,
+          child: Container(
+            width: double.infinity,
+            padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 12),
+            decoration: BoxDecoration(
+              border: Border.all(color: NoolColors.ink, width: 3),
+            ),
+            child: busy
+                ? const Center(
+                    child: SizedBox(
+                      width: 22,
+                      height: 22,
+                      child: NoolLottieView.loading(
+                        width: 28,
+                        height: 28,
+                        compact: true,
+                      ),
+                    ),
+                  )
+                : Text(
+                    context.s.dmMessageCta,
+                    textAlign: TextAlign.center,
+                    style: GoogleFonts.syne(
+                      color: NoolColors.ink,
+                      fontWeight: FontWeight.w800,
+                      fontSize: 15,
+                    ),
+                  ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class _SquadUpButton extends StatelessWidget {
   const _SquadUpButton({
     required this.status,
@@ -958,31 +914,29 @@ class _SquadUpButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final cfg = switch (status) {
-      SquadConnectionStatus.notConnected ||
-      SquadConnectionStatus.rejected =>
-        (
-          label: 'SQUAD UP! (Kadroya Kat)',
+      SquadConnectionStatus.notConnected || SquadConnectionStatus.rejected => (
+          label: context.s.friendAddCta,
           bg: NoolColors.acid,
           fg: NoolColors.ink,
           enabled: true,
         ),
       SquadConnectionStatus.pendingSent => (
-          label: 'İstek Gönderildi...',
+          label: '${context.s.friendPendingSent} · ${context.s.friendCancel}',
           bg: NoolColors.lavender,
           fg: NoolColors.ink,
-          enabled: false,
+          enabled: true,
         ),
       SquadConnectionStatus.pendingReceived => (
-          label: 'Kabul Et!',
+          label: context.s.friendAccept,
           bg: NoolColors.tangerine,
           fg: NoolColors.ink,
           enabled: true,
         ),
       SquadConnectionStatus.accepted => (
-          label: "SQUAD'DASINIZ!",
+          label: '${context.s.friendAlready} · ${context.s.friendUnfriend}',
           bg: NoolColors.white,
           fg: NoolColors.ink,
-          enabled: false,
+          enabled: true,
         ),
     };
 
@@ -1005,7 +959,7 @@ class _SquadUpButton extends StatelessWidget {
                     child: SizedBox(
                       width: 22,
                       height: 22,
-                      child: const NoolLottieView.loading(
+                      child: NoolLottieView.loading(
                         width: 28,
                         height: 28,
                         compact: true,
@@ -1023,22 +977,6 @@ class _SquadUpButton extends StatelessWidget {
                   ),
           ),
         ),
-      ),
-    );
-  }
-}
-
-class _OtherAvatarFallback extends StatelessWidget {
-  const _OtherAvatarFallback();
-
-  @override
-  Widget build(BuildContext context) {
-    return ColoredBox(
-      color: NoolColors.acid.withOpacity(0.18),
-      child: const NoolIcon(
-        NoolIconData.person,
-        color: NoolColors.acid,
-        size: 40,
       ),
     );
   }
@@ -1152,7 +1090,7 @@ class _ProfileSkeletonState extends State<_ProfileSkeleton>
             width: width,
             height: height,
             decoration: BoxDecoration(
-              color: NoolColors.acid.withOpacity(opacity),
+              color: NoolColors.acid.withValues(alpha: opacity),
               borderRadius: radius ?? BorderRadius.circular(2),
               border: Border.all(color: NoolColors.ink, width: 2),
             ),
@@ -1214,7 +1152,7 @@ class _OtherDropPlayerState extends State<_OtherDropPlayer> {
   Future<void> _init() async {
     try {
       final c = VideoPlayerController.networkUrl(
-        Uri.parse(widget.post.videoUrl),
+        await SupabaseService.instance.playableVideoUri(widget.post.videoUrl),
       );
       await c.initialize();
       await c.setLooping(true);

@@ -1,13 +1,16 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
 
+import '../l10n/app_strings.dart';
 import '../services/auth_service.dart';
+import '../services/onboarding_service.dart';
 import '../theme/app_theme.dart';
 import '../theme/colors.dart';
+import '../utils/user_error.dart';
 import '../widgets/nool_chrome.dart';
+import '../widgets/nool_legal_consent.dart';
 import '../widgets/nool_logo.dart';
-import 'location_gate_screen.dart';
+import 'layout_manager.dart';
 import 'sign_in_screen.dart';
 
 /// Neo-brutalist Kayıt Ol — Google / Apple / e-posta.
@@ -15,11 +18,9 @@ class SignUpScreen extends StatefulWidget {
   const SignUpScreen({
     super.key,
     this.popOnSuccess = false,
-    this.gateMode = false,
   });
 
   final bool popOnSuccess;
-  final bool gateMode;
 
   @override
   State<SignUpScreen> createState() => _SignUpScreenState();
@@ -40,7 +41,22 @@ class _SignUpScreenState extends State<SignUpScreen>
   bool _busyApple = false;
   bool _busyEmail = false;
   bool _obscure = true;
+  bool _legalAccepted = false;
   String? _error;
+
+  bool get _busy => _busyGoogle || _busyApple || _busyEmail;
+
+  bool _ensureLegalAccepted() {
+    if (_legalAccepted) return true;
+    setState(() {
+      _error = context.s.legalMustAccept;
+    });
+    return false;
+  }
+
+  Future<void> _persistLegalAcceptance() async {
+    await OnboardingService.acceptLegalTerms();
+  }
 
   @override
   void initState() {
@@ -72,10 +88,13 @@ class _SignUpScreenState extends State<SignUpScreen>
       return;
     }
 
+    final username = AuthService().displayName ??
+        await OnboardingService.getUsername() ??
+        AppStrings.fromSettings().anonymousHandle;
     if (!mounted) return;
     await Navigator.of(context).pushAndRemoveUntil(
       noolRoute<void>(
-        page: const LocationGateScreen(),
+        page: LayoutManager(username: username),
         duration: const Duration(milliseconds: 480),
       ),
       (_) => false,
@@ -86,6 +105,7 @@ class _SignUpScreenState extends State<SignUpScreen>
     Future<void> Function() action, {
     required bool google,
   }) async {
+    if (!_ensureLegalAccepted()) return;
     setState(() {
       _error = null;
       if (google) {
@@ -95,12 +115,11 @@ class _SignUpScreenState extends State<SignUpScreen>
       }
     });
     try {
+      await _persistLegalAcceptance();
       await action();
       await _goHome();
-    } on AuthException catch (e) {
-      if (mounted) setState(() => _error = e.message);
     } catch (e) {
-      if (mounted) setState(() => _error = e.toString());
+      if (mounted) setState(() => _error = userFacingError(e, context.s));
     } finally {
       if (mounted) {
         setState(() {
@@ -112,12 +131,14 @@ class _SignUpScreenState extends State<SignUpScreen>
   }
 
   Future<void> _signUpEmail() async {
+    if (!_ensureLegalAccepted()) return;
     if (!_formKey.currentState!.validate()) return;
     setState(() {
       _busyEmail = true;
       _error = null;
     });
     try {
+      await _persistLegalAcceptance();
       final res = await AuthService().signUpWithEmail(
         email: _emailCtrl.text,
         password: _passwordCtrl.text,
@@ -125,17 +146,13 @@ class _SignUpScreenState extends State<SignUpScreen>
       if (res.session == null && res.user != null) {
         if (!mounted) return;
         setState(() {
-          _error =
-              'Mailini doğrula — sonra Giriş Yap ile içeri sız. '
-              '(Supabase e-posta onayı açıksa)';
+          _error = context.s.verifyEmailHint;
         });
         return;
       }
       await _goHome();
-    } on AuthException catch (e) {
-      if (mounted) setState(() => _error = e.message);
     } catch (e) {
-      if (mounted) setState(() => _error = e.toString());
+      if (mounted) setState(() => _error = userFacingError(e, context.s));
     } finally {
       if (mounted) setState(() => _busyEmail = false);
     }
@@ -145,9 +162,7 @@ class _SignUpScreenState extends State<SignUpScreen>
   Widget build(BuildContext context) {
     final bottomInset = MediaQuery.viewInsetsOf(context).bottom;
 
-    return PopScope(
-      canPop: !widget.gateMode,
-      child: Scaffold(
+    return Scaffold(
       resizeToAvoidBottomInset: true,
       body: Stack(
         fit: StackFit.expand,
@@ -178,7 +193,8 @@ class _SignUpScreenState extends State<SignUpScreen>
                             ),
                           ),
                         ),
-                        const NoolLogoMark(size: 72, border: true, shadow: true),
+                        const NoolLogoMark(
+                            size: 72, border: true, shadow: true),
                         const SizedBox(height: 18),
                         Text(
                           'NOOL',
@@ -192,7 +208,7 @@ class _SignUpScreenState extends State<SignUpScreen>
                         ),
                         const SizedBox(height: 14),
                         Text(
-                          'Kayıt Ol',
+                          context.s.signUp,
                           style: GoogleFonts.syne(
                             fontSize: 26,
                             fontWeight: FontWeight.w800,
@@ -202,7 +218,7 @@ class _SignUpScreenState extends State<SignUpScreen>
                         ),
                         const SizedBox(height: 8),
                         Text(
-                          'Hesabını güvenceye al — kaos kalıcı olsun.',
+                          context.s.signUpSubtitle,
                           style: GoogleFonts.syne(
                             fontSize: 15,
                             fontWeight: FontWeight.w500,
@@ -210,14 +226,45 @@ class _SignUpScreenState extends State<SignUpScreen>
                             height: 1.4,
                           ),
                         ),
-                        const SizedBox(height: 28),
+                        const SizedBox(height: 22),
+                        NoolLegalConsent(
+                          accepted: _legalAccepted,
+                          onChanged: (v) => setState(() {
+                            _legalAccepted = v;
+                            if (v) _error = null;
+                          }),
+                        ),
+                        const SizedBox(height: 10),
+                        Align(
+                          alignment: Alignment.centerLeft,
+                          child: TextButton(
+                            onPressed: () =>
+                                NoolLegalConsent.showTermsSheet(context),
+                            style: TextButton.styleFrom(
+                              padding: EdgeInsets.zero,
+                              minimumSize: Size.zero,
+                              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                            ),
+                            child: Text(
+                              context.s.readFullTerms,
+                              style: GoogleFonts.syne(
+                                color: NoolColors.acid,
+                                fontWeight: FontWeight.w800,
+                                fontSize: 13,
+                                decoration: TextDecoration.underline,
+                                decorationColor: NoolColors.acid,
+                              ),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 22),
                         AuthSocialButton(
-                          label: 'Google ile kayıt ol',
+                          label: context.s.continueWithGoogle,
                           background: NoolColors.acid,
                           foreground: NoolColors.ink,
                           icon: Icons.g_mobiledata_rounded,
                           loading: _busyGoogle,
-                          onPressed: (_busyGoogle || _busyApple || _busyEmail)
+                          onPressed: _busy
                               ? null
                               : () => _runSocial(
                                     () async {
@@ -226,33 +273,20 @@ class _SignUpScreenState extends State<SignUpScreen>
                                     google: true,
                                   ),
                         ),
-                        const SizedBox(height: 12),
-                        AuthSocialButton(
-                          label: 'Apple ile kayıt ol',
-                          background: NoolColors.ink,
-                          foreground: NoolColors.white,
-                          icon: Icons.apple,
-                          loading: _busyApple,
-                          onPressed: (_busyGoogle || _busyApple || _busyEmail)
-                              ? null
-                              : () => _runSocial(
-                                    () async {
-                                      await AuthService().signInWithApple();
-                                    },
-                                    google: false,
-                                  ),
-                        ),
                         const SizedBox(height: 28),
                         Row(
                           children: [
                             Expanded(
-                              child: Container(height: 3, color: NoolColors.ink),
+                              child: Container(
+                                height: 3,
+                                color: NoolColors.lavender,
+                              ),
                             ),
                             Padding(
                               padding:
                                   const EdgeInsets.symmetric(horizontal: 12),
                               child: Text(
-                                'veya e-posta',
+                                context.s.orEmailDivider,
                                 style: GoogleFonts.syne(
                                   color: NoolColors.lavender,
                                   fontWeight: FontWeight.w700,
@@ -261,21 +295,25 @@ class _SignUpScreenState extends State<SignUpScreen>
                               ),
                             ),
                             Expanded(
-                              child: Container(height: 3, color: NoolColors.ink),
+                              child: Container(
+                                height: 3,
+                                color: NoolColors.lavender,
+                              ),
                             ),
                           ],
                         ),
                         const SizedBox(height: 20),
                         AuthBrutalField(
                           controller: _emailCtrl,
-                          label: 'E-posta',
+                          label: context.s.emailLabel,
                           keyboardType: TextInputType.emailAddress,
                           validator: (v) {
+                            final s = context.s;
                             if (v == null || v.trim().isEmpty) {
-                              return 'E-posta lazım';
+                              return s.forgotPasswordNeedEmail;
                             }
                             if (!v.contains('@')) {
-                              return 'Geçerli bir e-posta yaz';
+                              return s.forgotPasswordInvalidEmail;
                             }
                             return null;
                           },
@@ -283,7 +321,7 @@ class _SignUpScreenState extends State<SignUpScreen>
                         const SizedBox(height: 12),
                         AuthBrutalField(
                           controller: _passwordCtrl,
-                          label: 'Şifre',
+                          label: context.s.passwordLabel,
                           obscureText: _obscure,
                           suffix: IconButton(
                             onPressed: () =>
@@ -297,7 +335,7 @@ class _SignUpScreenState extends State<SignUpScreen>
                           ),
                           validator: (v) {
                             if (v == null || v.length < 6) {
-                              return 'En az 6 karakter';
+                              return context.s.resetPasswordTooShort;
                             }
                             return null;
                           },
@@ -305,11 +343,11 @@ class _SignUpScreenState extends State<SignUpScreen>
                         const SizedBox(height: 12),
                         AuthBrutalField(
                           controller: _confirmCtrl,
-                          label: 'Şifre tekrar',
+                          label: context.s.passwordConfirmLabel,
                           obscureText: _obscure,
                           validator: (v) {
                             if (v != _passwordCtrl.text) {
-                              return 'Şifreler uyuşmuyor';
+                              return context.s.resetPasswordMismatch;
                             }
                             return null;
                           },
@@ -331,12 +369,14 @@ class _SignUpScreenState extends State<SignUpScreen>
                           child: SizedBox(
                             width: double.infinity,
                             child: ElevatedButton(
-                              onPressed: _busyEmail || _busyGoogle || _busyApple
-                                  ? null
-                                  : _signUpEmail,
+                              onPressed: _busy ? null : _signUpEmail,
                               child: _busyEmail
                                   ? const AuthAcidLoader()
-                                  : const Text('KAYIT OL'),
+                                  : Text(
+                                      _legalAccepted
+                                          ? context.s.signUpCta
+                                          : context.s.signUpCtaNeedConsent,
+                                    ),
                             ),
                           ),
                         ),
@@ -347,7 +387,6 @@ class _SignUpScreenState extends State<SignUpScreen>
                               MaterialPageRoute<void>(
                                 builder: (_) => SignInScreen(
                                   popOnSuccess: widget.popOnSuccess,
-                                  gateMode: widget.gateMode,
                                 ),
                               ),
                             );
@@ -381,7 +420,6 @@ class _SignUpScreenState extends State<SignUpScreen>
           ),
         ],
       ),
-    ),
     );
   }
 }

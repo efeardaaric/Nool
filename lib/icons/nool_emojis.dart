@@ -180,7 +180,8 @@ class NoolEmojiText extends StatelessWidget {
     var start = 0;
     for (final match in pattern.allMatches(text)) {
       if (match.start > start) {
-        spans.add(TextSpan(text: text.substring(start, match.start), style: style));
+        spans.add(
+            TextSpan(text: text.substring(start, match.start), style: style));
       }
       final emoji = NoolEmojiData.fromToken(match.group(0)!);
       if (emoji != null) {
@@ -213,6 +214,34 @@ class NoolEmojiText extends StatelessWidget {
   }
 }
 
+/// DB `reaction_type` keys for feed reactions.
+abstract final class NoolReactionTypes {
+  static const laugh = 'laugh';
+  static const pepper = 'pepper';
+  static const smile = 'smile';
+  static const angry = 'angry';
+  static const star = 'star';
+
+  static const all = <String>[laugh, pepper, smile, angry, star];
+
+  /// Visual mapping onto existing neo-brutal emoji assets.
+  static NoolEmojiData emojiFor(String type) {
+    switch (type) {
+      case pepper:
+        return NoolEmojiData.fire;
+      case smile:
+        return NoolEmojiData.cool;
+      case angry:
+        return NoolEmojiData.dead;
+      case star:
+        return NoolEmojiData.party;
+      case laugh:
+      default:
+        return NoolEmojiData.laugh;
+    }
+  }
+}
+
 /// Quick reaction chip strip (feed).
 class NoolReactionBar extends StatelessWidget {
   const NoolReactionBar({
@@ -222,29 +251,24 @@ class NoolReactionBar extends StatelessWidget {
     required this.onReact,
   });
 
-  final NoolEmojiData? selected;
-  final Map<NoolEmojiData, int> counts;
-  final ValueChanged<NoolEmojiData> onReact;
+  /// Currently selected `reaction_type` key (or null).
+  final String? selected;
 
-  static const _rail = <NoolEmojiData>[
-    NoolEmojiData.cool,
-    NoolEmojiData.fire,
-    NoolEmojiData.laugh,
-    NoolEmojiData.dead,
-    NoolEmojiData.party,
-  ];
+  /// Counts keyed by `reaction_type` (laugh / pepper / smile / angry / star).
+  final Map<String, int> counts;
+  final ValueChanged<String> onReact;
 
   @override
   Widget build(BuildContext context) {
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
-        for (final emoji in _rail) ...[
+        for (final type in NoolReactionTypes.all) ...[
           _ReactionChip(
-            emoji: emoji,
-            count: counts[emoji] ?? 0,
-            selected: selected == emoji,
-            onTap: () => onReact(emoji),
+            emoji: NoolReactionTypes.emojiFor(type),
+            count: counts[type] ?? 0,
+            selected: selected == type,
+            onTap: () => onReact(type),
           ),
           const SizedBox(width: 6),
         ],
@@ -277,7 +301,8 @@ class _ReactionChip extends StatelessWidget {
         duration: const Duration(milliseconds: 160),
         padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
         decoration: BoxDecoration(
-          color: selected ? NoolColors.acid : Colors.black.withOpacity(0.45),
+          color:
+              selected ? NoolColors.acid : Colors.black.withValues(alpha: 0.45),
           border: Border.all(color: NoolColors.ink, width: 2),
           boxShadow: selected
               ? const [

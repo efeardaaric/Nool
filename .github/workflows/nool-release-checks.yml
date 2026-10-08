@@ -1,0 +1,68 @@
+name: Nool release checks
+on:
+  push:
+    branches: ['release/nool-20261008']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  flutter:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.47.4'
+          channel: stable
+          cache: true
+      - run: flutter pub get
+      - run: flutter analyze --no-pub
+      - run: flutter test --no-pub --reporter expanded
+      - run: dart tool/release_smoke.dart
+      - run: flutter build bundle --release --no-pub
+  edge:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+      - run: deno check supabase/functions/apple-revoke/index.ts supabase/functions/fcm-notify/index.ts supabase/functions/curiosity-cron/index.ts
+      - run: deno test --allow-env=NOOL_SERVER_WEBHOOK_SECRET supabase/functions/_shared/authorize_test.ts supabase/functions/apple-revoke/handler_test.ts
+  ios:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.47.4'
+          channel: stable
+          cache: true
+      - run: xcodebuild -version
+      - run: flutter pub get
+      - run: flutter build ios --release --no-codesign --no-pub
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nool-unsigned-ios
+          path: build/ios/iphoneos/Runner.app
+          if-no-files-found: error
+  database:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+      - name: Initialize isolated local test project
+        run: supabase init
+      - name: Start isolated local Supabase and apply migrations
+        run: supabase start
+      - name: Verify database migrations
+        run: supabase db reset --local
+      - name: Stop isolated local test project
+        if: always()
+        run: supabase stop --no-backup

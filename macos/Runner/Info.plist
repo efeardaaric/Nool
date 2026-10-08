@@ -33,7 +33,7 @@
 	<key>NSLocationUsageDescription</key>
 	<string>Yakındaki kaosu görebilmemiz için konumuna ihtiyacımız var.</string>
 	<key>NSCameraUsageDescription</key>
-	<string>İtiraf ve gizem videoları çekmek için kameraya ihtiyacımız var.</string>
+	<string>Kampüse video bırakabilmen için kameraya ihtiyacımız var.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Video kaydına ses eklemek için mikrofona ihtiyacımız var.</string>
 </dict>

@@ -3,218 +3,178 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
-import '../models/message_models.dart';
+import '../models/notification_item.dart';
 import 'auth_service.dart';
 import 'supabase_service.dart';
 
-/// Squad istekleri + DM için canlı in-app bildirim akışı.
+/// In-app notification center (Supabase `notifications` + optional Realtime).
 class SocialNotificationService {
-  SocialNotificationService._internal();
+  SocialNotificationService._();
+  static final SocialNotificationService instance =
+      SocialNotificationService._();
 
-  static final SocialNotificationService _instance =
-      SocialNotificationService._internal();
-
-  factory SocialNotificationService() => _instance;
-
-  final _events = StreamController<SocialEvent>.broadcast();
-  final ValueNotifier<int> unreadCount = ValueNotifier<int>(0);
-
+  final _unreadCtrl = StreamController<int>.broadcast();
   RealtimeChannel? _channel;
-  String? _boundUid;
-  bool _started = false;
+  int _unread = 0;
 
-  Stream<SocialEvent> get events => _events.stream;
+  Stream<int> get unreadCountStream => _unreadCtrl.stream;
+  int get unreadCount => _unread;
 
   SupabaseClient get _client => SupabaseService.instance.client;
-
   String? get _uid => AuthService().currentUser?.id;
 
-  /// Oturum açılınca çağır; zaten açıksa no-op.
-  Future<void> start() async {
-    if (!SupabaseService.instance.isReady) return;
-    final uid = _uid;
-    if (uid == null) {
-      await stop();
-      return;
-    }
-    if (_started && _boundUid == uid) return;
-
-    await stop();
-    _boundUid = uid;
-    _started = true;
-
-    try {
-      await _refreshBadgeCounts(uid);
-
-      _channel = _client
-          .channel('social-notify-$uid')
-          .onPostgresChanges(
-            event: PostgresChangeEvent.insert,
-            schema: 'public',
-            table: 'squads',
-            callback: (payload) => _onSquadInsert(payload, uid),
-          )
-          .onPostgresChanges(
-            event: PostgresChangeEvent.update,
-            schema: 'public',
-            table: 'squads',
-            callback: (payload) => _onSquadUpdate(payload, uid),
-          )
-          .onPostgresChanges(
-            event: PostgresChangeEvent.insert,
-            schema: 'public',
-            table: 'messages',
-            callback: (payload) => _onMessageInsert(payload, uid),
-          )
-          .subscribe();
-    } catch (e, st) {
-      debugPrint('SocialNotificationService.start: $e\n$st');
-      _started = false;
+  void _assertReady() {
+    if (!SupabaseService.instance.isReady) {
+      throw StateError('Supabase hazır değil.');
     }
   }
 
-  Future<void> stop() async {
+  void _assertSignedIn() {
+    _assertReady();
+    if (_uid == null) throw StateError('Oturum gerekli.');
+  }
+
+  Future<List<NoolNotification>> listMyNotifications({
+    int limit = 60,
+    bool unreadOnly = false,
+  }) async {
+    _assertSignedIn();
+    final uid = _uid!;
+
+    try {
+      // ignore: prefer_typing_uninitialized_variables
+      late final dynamic rows;
+      if (unreadOnly) {
+        rows = await _client
+            .from('notifications')
+            .select()
+            .eq('user_id', uid)
+            .isFilter('read_at', null)
+            .order('created_at', ascending: false)
+            .limit(limit);
+      } else {
+        rows = await _client
+            .from('notifications')
+            .select()
+            .eq('user_id', uid)
+            .order('created_at', ascending: false)
+            .limit(limit);
+      }
+
+      return (rows as List<dynamic>)
+          .whereType<Map>()
+          .map((e) => NoolNotification.fromRow(Map<String, dynamic>.from(e)))
+          .toList(growable: false);
+    } catch (e, st) {
+      debugPrint('SocialNotificationService.list: $e\n$st');
+      rethrow;
+    }
+  }
+
+  Future<int> fetchUnreadCount() async {
+    if (!SupabaseService.instance.isReady || _uid == null) {
+      _setUnread(0);
+      return 0;
+    }
+
+    try {
+      final rows = await _client
+          .from('notifications')
+          .select('id')
+          .eq('user_id', _uid!)
+          .isFilter('read_at', null);
+
+      final count = (rows as List).length;
+      _setUnread(count);
+      return count;
+    } catch (e, st) {
+      debugPrint('SocialNotificationService.unread: $e\n$st');
+      return _unread;
+    }
+  }
+
+  Future<void> markRead({List<String>? ids}) async {
+    _assertSignedIn();
+    try {
+      if (ids == null || ids.isEmpty) {
+        await _client.rpc('mark_notifications_read');
+      } else {
+        await _client.rpc(
+          'mark_notifications_read',
+          params: {'p_ids': ids},
+        );
+      }
+      await fetchUnreadCount();
+    } catch (e, st) {
+      debugPrint('SocialNotificationService.markRead rpc: $e\n$st');
+      try {
+        if (ids != null && ids.isNotEmpty) {
+          await _client
+              .from('notifications')
+              .update({'read_at': DateTime.now().toUtc().toIso8601String()})
+              .eq('user_id', _uid!)
+              .inFilter('id', ids)
+              .isFilter('read_at', null);
+        } else {
+          await _client
+              .from('notifications')
+              .update({'read_at': DateTime.now().toUtc().toIso8601String()})
+              .eq('user_id', _uid!)
+              .isFilter('read_at', null);
+        }
+        await fetchUnreadCount();
+      } catch (e2, st2) {
+        debugPrint('SocialNotificationService.markRead fallback: $e2\n$st2');
+        rethrow;
+      }
+    }
+  }
+
+  Future<void> markOneRead(String id) => markRead(ids: [id]);
+
+  /// Soft-start Realtime + initial unread poll. Safe if publication missing.
+  Future<void> startWatching() async {
+    if (!SupabaseService.instance.isReady || _uid == null) return;
+    await fetchUnreadCount();
+    await stopWatching();
+
+    try {
+      final uid = _uid!;
+      final channel = _client.channel('nool-notifications-$uid');
+      channel.onPostgresChanges(
+        event: PostgresChangeEvent.insert,
+        schema: 'public',
+        table: 'notifications',
+        filter: PostgresChangeFilter(
+          type: PostgresChangeFilterType.eq,
+          column: 'user_id',
+          value: uid,
+        ),
+        callback: (_) {
+          _setUnread(_unread + 1);
+        },
+      );
+      channel.subscribe();
+      _channel = channel;
+    } catch (e, st) {
+      debugPrint('SocialNotificationService.realtime: $e\n$st');
+    }
+  }
+
+  Future<void> stopWatching() async {
     final ch = _channel;
     _channel = null;
-    _started = false;
-    _boundUid = null;
     if (ch != null) {
       try {
         await _client.removeChannel(ch);
-      } catch (_) {}
+      } catch (e) {
+        debugPrint('SocialNotificationService.stopWatching: $e');
+      }
     }
   }
 
-  void markAllSeen() {
-    unreadCount.value = 0;
-  }
-
-  void decrementUnread([int by = 1]) {
-    unreadCount.value = (unreadCount.value - by).clamp(0, 9999);
-  }
-
-  Future<void> _refreshBadgeCounts(String uid) async {
-    try {
-      final pending = await _client
-          .from('squads')
-          .select('id')
-          .eq('receiver_id', uid)
-          .eq('status', 'pending');
-      unreadCount.value = (pending as List).length;
-    } catch (e) {
-      debugPrint('SocialNotificationService._refreshBadgeCounts: $e');
-    }
-  }
-
-  void _emit(SocialEvent event) {
-    if (!_events.isClosed) {
-      _events.add(event);
-      unreadCount.value = unreadCount.value + 1;
-    }
-  }
-
-  Future<void> _onSquadInsert(PostgresChangePayload payload, String uid) async {
-    final row = payload.newRecord;
-    final receiverId = row['receiver_id']?.toString();
-    final senderId = row['sender_id']?.toString();
-    final status = row['status']?.toString() ?? 'pending';
-    if (receiverId != uid || status != 'pending' || senderId == null) return;
-
-    final username = await _usernameOf(senderId);
-    _emit(
-      SocialEvent(
-        id: 'squad-req-${row['id']}',
-        type: SocialEventType.squadRequest,
-        title: 'Yeni squad isteği',
-        body: '$username sana squad attı.',
-        createdAt: DateTime.now().toUtc(),
-        relatedUserId: senderId,
-        relatedUsername: username,
-        requestId: row['id']?.toString(),
-      ),
-    );
-  }
-
-  Future<void> _onSquadUpdate(PostgresChangePayload payload, String uid) async {
-    final row = payload.newRecord;
-    final old = payload.oldRecord;
-    final status = row['status']?.toString();
-    final oldStatus = old['status']?.toString();
-    if (status != 'accepted' || oldStatus == 'accepted') return;
-
-    final senderId = row['sender_id']?.toString();
-    final receiverId = row['receiver_id']?.toString();
-    // Kabul bildirimi gönderene gider.
-    if (senderId != uid || receiverId == null) return;
-
-    final username = await _usernameOf(receiverId);
-    _emit(
-      SocialEvent(
-        id: 'squad-ok-${row['id']}-${DateTime.now().millisecondsSinceEpoch}',
-        type: SocialEventType.squadAccepted,
-        title: 'Squad kabul edildi',
-        body: '$username isteğini kabul etti. Mesajlaşabilirsiniz.',
-        createdAt: DateTime.now().toUtc(),
-        relatedUserId: receiverId,
-        relatedUsername: username,
-        requestId: row['id']?.toString(),
-      ),
-    );
-  }
-
-  Future<void> _onMessageInsert(
-    PostgresChangePayload payload,
-    String uid,
-  ) async {
-    final row = payload.newRecord;
-    final senderId = row['sender_id']?.toString();
-    final conversationId = row['conversation_id']?.toString();
-    if (senderId == null || senderId == uid || conversationId == null) return;
-
-    try {
-      final conv = await _client
-          .from('conversations')
-          .select('id, participant_low, participant_high')
-          .eq('id', conversationId)
-          .maybeSingle();
-      if (conv == null) return;
-      final low = conv['participant_low']?.toString();
-      final high = conv['participant_high']?.toString();
-      if (uid != low && uid != high) return;
-    } catch (_) {
-      return;
-    }
-
-    final username = await _usernameOf(senderId);
-    final body = (row['body'] as String?) ?? '';
-    final preview = body.length > 80 ? '${body.substring(0, 80)}…' : body;
-
-    _emit(
-      SocialEvent(
-        id: 'msg-${row['id']}',
-        type: SocialEventType.newMessage,
-        title: 'Yeni mesaj',
-        body: '$username: $preview',
-        createdAt: DateTime.now().toUtc(),
-        relatedUserId: senderId,
-        relatedUsername: username,
-        conversationId: conversationId,
-      ),
-    );
-  }
-
-  Future<String> _usernameOf(String userId) async {
-    try {
-      final row = await _client
-          .from('profiles')
-          .select('username')
-          .eq('id', userId)
-          .maybeSingle();
-      final name = row?['username'] as String?;
-      if (name == null || name.isEmpty) return '@anon';
-      return name.startsWith('@') ? name : '@$name';
-    } catch (_) {
-      return '@anon';
-    }
+  void _setUnread(int n) {
+    _unread = n < 0 ? 0 : n;
+    if (!_unreadCtrl.isClosed) _unreadCtrl.add(_unread);
   }
 }

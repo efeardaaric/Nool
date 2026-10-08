@@ -33,7 +33,6 @@ enum NoolIconData {
   more,
   stop,
   record,
-  gallery,
 }
 
 extension NoolIconDataX on NoolIconData {
@@ -90,8 +89,6 @@ extension NoolIconDataX on NoolIconData {
         return '$root/stop.svg';
       case NoolIconData.record:
         return '$root/record.svg';
-      case NoolIconData.gallery:
-        return '$root/gallery.svg';
     }
   }
 }
@@ -120,17 +117,17 @@ class NoolIcon extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // Outline SVG'ler stroke="#000" kullanır; currentColor yetmez.
-    // srcIn ile tüm yollar [color]'a boyanır (nav'da görünürlük için şart).
-    final picture = SvgPicture.asset(
-      icon.assetPath,
-      width: size,
-      height: size,
-      theme: SvgTheme(currentColor: color),
-      colorFilter: ColorFilter.mode(color, BlendMode.srcIn),
-      fit: BoxFit.contain,
-    );
+    // SVG'lerde stroke="#000" sabit — ColorFilter ile tüm ikon boyanır
+    // (aksi halde koyu zeminde nav ikonları görünmez).
+    Widget pictureFor(Color c) => SvgPicture.asset(
+          icon.assetPath,
+          width: size,
+          height: size,
+          colorFilter: ColorFilter.mode(c, BlendMode.srcIn),
+          fit: BoxFit.contain,
+        );
 
+    final picture = pictureFor(color);
     if (!withBrutalShadow) return picture;
 
     return Stack(
@@ -139,14 +136,7 @@ class NoolIcon extends StatelessWidget {
         Positioned(
           left: 2,
           top: 2,
-          child: SvgPicture.asset(
-            icon.assetPath,
-            width: size,
-            height: size,
-            theme: const SvgTheme(currentColor: NoolColors.ink),
-            colorFilter: const ColorFilter.mode(NoolColors.ink, BlendMode.srcIn),
-            fit: BoxFit.contain,
-          ),
+          child: pictureFor(NoolColors.ink),
         ),
         picture,
       ],

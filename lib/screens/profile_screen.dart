@@ -1,37 +1,38 @@
-import 'dart:async';
 import 'dart:io';
 import 'dart:ui';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:video_player/video_player.dart';
 
 import '../icons/nool_icons.dart';
+import '../l10n/app_strings.dart';
 import '../models/user_profile.dart';
 import '../models/vibe_post.dart';
 import '../services/auth_service.dart';
 import '../services/onboarding_service.dart';
 import '../services/profile_service.dart';
 import '../services/supabase_service.dart';
-import '../theme/app_theme.dart';
 import '../theme/colors.dart';
-import '../services/social_notification_service.dart';
+import '../utils/user_error.dart';
+import '../widgets/nool_avatar.dart';
 import '../widgets/nool_chrome.dart';
 import '../widgets/nool_logo.dart';
 import '../widgets/nool_lottie.dart';
-import 'inbox_screen.dart';
+import '../widgets/nool_notification_entry.dart';
+import 'settings_screen.dart';
 import 'splash_screen.dart';
 
-/// Kişisel profil — avatar, bio, My Drops ızgarası, düzenle / sil.
+/// Kişisel profil — avatar, bio, My Drops, düzenle / çıkış / ayarlar.
 class ProfileScreen extends StatefulWidget {
   const ProfileScreen({
     super.key,
     this.embedded = false,
   });
 
-  /// LayoutManager sekmesi olarak gösteriliyorsa geri butonu gizlenir
-  /// ve alt floating nav için padding eklenir.
   final bool embedded;
 
   @override
@@ -40,34 +41,15 @@ class ProfileScreen extends StatefulWidget {
 
 class _ProfileScreenState extends State<ProfileScreen> {
   UserProfile? _profile;
-  String _fallbackUsername = '@anon';
+  String _fallbackUsername = AppStrings.fromSettings().anonymousHandle;
   List<VibePost> _drops = const [];
   bool _loading = true;
   String? _error;
-  Timer? _ttlTimer;
 
   @override
   void initState() {
     super.initState();
     _bootstrap();
-    // 24 saat TTL: süresi dolan drop'lar pull olmadan da kaybolsun.
-    _ttlTimer = Timer.periodic(const Duration(minutes: 1), (_) {
-      _pruneExpiredDrops();
-    });
-  }
-
-  @override
-  void dispose() {
-    _ttlTimer?.cancel();
-    super.dispose();
-  }
-
-  void _pruneExpiredDrops() {
-    if (!mounted || _drops.isEmpty) return;
-    final fresh = SupabaseService.instance.filterFreshVideos(_drops);
-    if (fresh.length != _drops.length) {
-      setState(() => _drops = fresh);
-    }
   }
 
   Future<void> _bootstrap() async {
@@ -82,7 +64,9 @@ class _ProfileScreenState extends State<ProfileScreen> {
       final drops = await ProfileService().getMyUploadedVideos();
       if (!mounted) return;
       setState(() {
-        _fallbackUsername = localName ?? AuthService().displayName ?? '@anon';
+        _fallbackUsername = localName ??
+            AuthService().displayName ??
+            AppStrings.fromSettings().anonymousHandle;
         _profile = profile;
         _drops = drops;
         _loading = false;
@@ -91,7 +75,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
       if (!mounted) return;
       setState(() {
         _loading = false;
-        _error = e.toString();
+        _error = userFacingError(e, context.s);
       });
     }
   }
@@ -108,7 +92,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
 
   Future<void> _openEditSheet() async {
     if (!AuthService().isSignedIn) {
-      _toast('Profil düzenlemek için giriş yap.');
+      _toast(context.s.editProfileNeedSignIn);
       return;
     }
 
@@ -125,97 +109,11 @@ class _ProfileScreenState extends State<ProfileScreen> {
 
     if (updated != null && mounted) {
       setState(() => _profile = updated);
-      _toast('Profil güncellendi.');
+      _toast(context.s.profileUpdated);
     }
   }
 
-  Future<void> _openBlockedSheet() async {
-    if (!AuthService().isSignedIn) {
-      _toast('Engellenenleri görmek için giriş yap.');
-      return;
-    }
-    await showModalBottomSheet<void>(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
-      builder: (_) => const _BlockedUsersSheet(),
-    );
-  }
-
-  Future<void> _confirmLogout() async {
-    if (!AuthService().isSignedIn) {
-      _toast('Zaten çıkış yapılmış.');
-      return;
-    }
-
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: NoolColors.night,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(4),
-          side: const BorderSide(color: NoolColors.acid, width: 3),
-        ),
-        title: Text(
-          'Çıkış yap?',
-          style: GoogleFonts.syne(
-            color: NoolColors.acid,
-            fontWeight: FontWeight.w800,
-            fontSize: 22,
-          ),
-        ),
-        content: Text(
-          'Oturumun kapanacak. Drop’ların kampüste kalır; tekrar girince '
-          'profiline dönersin.',
-          style: GoogleFonts.syne(
-            color: NoolColors.white,
-            fontWeight: FontWeight.w600,
-            height: 1.4,
-          ),
-        ),
-        actionsAlignment: MainAxisAlignment.spaceBetween,
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: Text(
-              'Vazgeç',
-              style: GoogleFonts.syne(
-                color: NoolColors.lavender,
-                fontWeight: FontWeight.w700,
-              ),
-            ),
-          ),
-          BrutalShadow(
-            offset: const Offset(3, 3),
-            child: Material(
-              color: NoolColors.acid,
-              child: InkWell(
-                onTap: () => Navigator.pop(ctx, true),
-                child: Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 14,
-                    vertical: 10,
-                  ),
-                  decoration: BoxDecoration(
-                    border: Border.all(color: NoolColors.ink, width: 3),
-                  ),
-                  child: Text(
-                    'ÇIKIŞ',
-                    style: GoogleFonts.syne(
-                      color: NoolColors.ink,
-                      fontWeight: FontWeight.w800,
-                    ),
-                  ),
-                ),
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-
-    if (confirmed != true || !mounted) return;
-
+  Future<void> _signOut() async {
     try {
       await AuthService().signOut();
       if (!mounted) return;
@@ -230,100 +128,13 @@ class _ProfileScreenState extends State<ProfileScreen> {
       );
     } catch (e) {
       if (!mounted) return;
-      _toast('Çıkış yapılamadı: $e');
+      _toast(userFacingError(e, context.s));
     }
   }
 
-  Future<void> _confirmDeleteAccount() async {
-    if (!AuthService().isSignedIn) {
-      _toast('Silinecek hesap yok — önce giriş yap.');
-      return;
-    }
-
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: NoolColors.night,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(4),
-          side: const BorderSide(color: NoolColors.acid, width: 3),
-        ),
-        title: Text(
-          'DİKKAT!',
-          style: GoogleFonts.syne(
-            color: NoolColors.acid,
-            fontWeight: FontWeight.w800,
-            fontSize: 22,
-          ),
-        ),
-        content: Text(
-          'Bu işlem geri alınamaz, tüm videoların ve squad bağlantıların '
-          'kampüsten silinecek!',
-          style: GoogleFonts.syne(
-            color: NoolColors.white,
-            fontWeight: FontWeight.w600,
-            height: 1.4,
-          ),
-        ),
-        actionsAlignment: MainAxisAlignment.spaceBetween,
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: Text(
-              'Vazgeç',
-              style: GoogleFonts.syne(
-                color: NoolColors.lavender,
-                fontWeight: FontWeight.w700,
-              ),
-            ),
-          ),
-          BrutalShadow(
-            offset: const Offset(3, 3),
-            child: Material(
-              color: NoolColors.tangerine,
-              child: InkWell(
-                onTap: () => Navigator.pop(ctx, true),
-                child: Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 14,
-                    vertical: 10,
-                  ),
-                  decoration: BoxDecoration(
-                    border: Border.all(color: NoolColors.ink, width: 3),
-                  ),
-                  child: Text(
-                    'SİL',
-                    style: GoogleFonts.syne(
-                      color: NoolColors.ink,
-                      fontWeight: FontWeight.w800,
-                    ),
-                  ),
-                ),
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-
-    if (confirmed != true || !mounted) return;
-
-    try {
-      await ProfileService().deleteAccount();
-      if (!mounted) return;
-      Navigator.of(context).pushAndRemoveUntil(
-        PageRouteBuilder<void>(
-          transitionDuration: const Duration(milliseconds: 420),
-          pageBuilder: (_, __, ___) => const SplashScreen(),
-          transitionsBuilder: (_, anim, __, child) =>
-              FadeTransition(opacity: anim, child: child),
-        ),
-        (_) => false,
-      );
-    } catch (e) {
-      if (!mounted) return;
-      _toast('Hesap silinemedi: $e');
-    }
+  Future<void> _openSettings() async {
+    await Navigator.of(context).push(SettingsScreen.route());
+    if (mounted) await _bootstrap();
   }
 
   void _openDrop(VibePost post) {
@@ -348,10 +159,235 @@ class _ProfileScreenState extends State<ProfileScreen> {
     );
   }
 
+  Future<void> _manageDrop(VibePost post) async {
+    final action = await showModalBottomSheet<String>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) {
+        final sheet = AppStrings.of(ctx);
+        return Padding(
+          padding: const EdgeInsets.fromLTRB(12, 0, 12, 24),
+          child: Container(
+            padding: const EdgeInsets.fromLTRB(16, 14, 16, 12),
+            decoration: BoxDecoration(
+              color: NoolColors.night,
+              border: Border.all(color: NoolColors.acid, width: 3),
+              boxShadow: const [
+                BoxShadow(
+                  color: NoolColors.ink,
+                  offset: Offset(4, 4),
+                  blurRadius: 0,
+                ),
+              ],
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Text(
+                  sheet.dropManageTitle,
+                  style: GoogleFonts.syne(
+                    color: NoolColors.acid,
+                    fontWeight: FontWeight.w800,
+                    fontSize: 18,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                TextButton(
+                  onPressed: () => Navigator.pop(ctx, 'edit'),
+                  child: Text(
+                    sheet.dropEditCaption,
+                    style: GoogleFonts.syne(
+                      color: NoolColors.white,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ),
+                TextButton(
+                  onPressed: () => Navigator.pop(ctx, 'delete'),
+                  child: Text(
+                    sheet.dropDelete,
+                    style: GoogleFonts.syne(
+                      color: NoolColors.tangerine,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+    if (!mounted || action == null) return;
+
+    if (action == 'delete') {
+      final ok = await _confirmDeleteDrop();
+      if (ok != true || !mounted) return;
+      try {
+        await ProfileService().deleteMyVideo(post);
+        if (!mounted) return;
+        setState(() => _drops = _drops.where((d) => d.id != post.id).toList());
+        _toast(context.s.dropDeletedToast);
+      } catch (e) {
+        _toast(
+          '${context.s.dropDeleteFailed}: ${userFacingError(e, context.s)}',
+        );
+      }
+      return;
+    }
+
+    if (action == 'edit') {
+      final ctrl = TextEditingController(text: post.caption);
+      final next = await showDialog<String>(
+        context: context,
+        builder: (ctx) {
+          final d = AppStrings.of(ctx);
+          return AlertDialog(
+            backgroundColor: NoolColors.night,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(4),
+              side: const BorderSide(color: NoolColors.acid, width: 3),
+            ),
+            title: Text(
+              d.dropCaptionTitle,
+              style: GoogleFonts.syne(
+                color: NoolColors.acid,
+                fontWeight: FontWeight.w800,
+              ),
+            ),
+            content: TextField(
+              controller: ctrl,
+              maxLines: 3,
+              style: GoogleFonts.syne(color: NoolColors.white),
+              decoration: const InputDecoration(
+                enabledBorder: OutlineInputBorder(
+                  borderSide: BorderSide(color: NoolColors.lavender, width: 2),
+                ),
+                focusedBorder: OutlineInputBorder(
+                  borderSide: BorderSide(color: NoolColors.acid, width: 2),
+                ),
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: Text(
+                  d.cancel,
+                  style: GoogleFonts.syne(color: NoolColors.lavender),
+                ),
+              ),
+              TextButton(
+                onPressed: () => Navigator.pop(ctx, ctrl.text.trim()),
+                child: Text(
+                  d.save,
+                  style: GoogleFonts.syne(
+                    color: NoolColors.acid,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+              ),
+            ],
+          );
+        },
+      );
+      ctrl.dispose();
+      if (next == null || !mounted) return;
+      try {
+        await ProfileService().updateMyVideoCaption(
+          videoId: post.id,
+          caption: next,
+        );
+        if (!mounted) return;
+        setState(() {
+          _drops = _drops
+              .map((d) => d.id == post.id ? d.copyWith(caption: next) : d)
+              .toList();
+        });
+        _toast(context.s.dropCaptionUpdated);
+      } catch (e) {
+        _toast(
+          '${context.s.dropCaptionFailed}: ${userFacingError(e, context.s)}',
+        );
+      }
+    }
+  }
+
+  Future<bool?> _confirmDeleteDrop() {
+    return showDialog<bool>(
+      context: context,
+      builder: (ctx) {
+        final s = AppStrings.of(ctx);
+        return AlertDialog(
+          backgroundColor: NoolColors.night,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(4),
+            side: const BorderSide(color: NoolColors.acid, width: 3),
+          ),
+          title: Text(
+            s.dropDeleteConfirmTitle,
+            style: GoogleFonts.syne(
+              color: NoolColors.acid,
+              fontWeight: FontWeight.w800,
+              fontSize: 22,
+            ),
+          ),
+          content: Text(
+            s.dropDeleteConfirmBody,
+            style: GoogleFonts.syne(
+              color: NoolColors.white,
+              fontWeight: FontWeight.w600,
+              height: 1.4,
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: Text(
+                s.cancel,
+                style: GoogleFonts.syne(
+                  color: NoolColors.lavender,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ),
+            Material(
+              color: NoolColors.tangerine,
+              child: InkWell(
+                onTap: () => Navigator.pop(ctx, true),
+                child: Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                  decoration: BoxDecoration(
+                    border: Border.all(color: NoolColors.ink, width: 3),
+                  ),
+                  child: Text(
+                    s.deleteConfirm,
+                    style: GoogleFonts.syne(
+                      color: NoolColors.ink,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
   void _toast(String message) {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         backgroundColor: NoolColors.acid,
+        behavior: SnackBarBehavior.floating,
+        margin: EdgeInsets.fromLTRB(
+          16,
+          0,
+          16,
+          widget.embedded ? 110 : 24,
+        ),
         content: Text(
           message,
           style: GoogleFonts.syne(
@@ -380,7 +416,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
               slivers: [
                 SliverToBoxAdapter(
                   child: Padding(
-                    padding: const EdgeInsets.fromLTRB(12, 12, 12, 0),
+                    padding: const EdgeInsets.fromLTRB(16, 12, 12, 0),
                     child: Row(
                       children: [
                         if (!widget.embedded)
@@ -393,8 +429,9 @@ class _ProfileScreenState extends State<ProfileScreen> {
                             ),
                           )
                         else
-                          const SizedBox(width: 8),
-                        const NoolLogoMark(size: 28, border: true, shadow: false),
+                          const SizedBox(width: 4),
+                        const NoolLogoMark(
+                            size: 28, border: true, shadow: false),
                         const SizedBox(width: 8),
                         Text(
                           'NOOL',
@@ -406,59 +443,15 @@ class _ProfileScreenState extends State<ProfileScreen> {
                           ),
                         ),
                         const Spacer(),
-                        ValueListenableBuilder<int>(
-                          valueListenable:
-                              SocialNotificationService().unreadCount,
-                          builder: (context, count, _) {
-                            return Stack(
-                              clipBehavior: Clip.none,
-                              children: [
-                                IconButton(
-                                  tooltip: 'Mesajlar',
-                                  onPressed: () {
-                                    Navigator.of(context).push(
-                                      InboxScreen.route(),
-                                    );
-                                  },
-                                  icon: const NoolIcon(
-                                    NoolIconData.send,
-                                    color: NoolColors.white,
-                                    size: 22,
-                                  ),
-                                ),
-                                if (count > 0)
-                                  Positioned(
-                                    right: 6,
-                                    top: 6,
-                                    child: Container(
-                                      constraints: const BoxConstraints(
-                                        minWidth: 16,
-                                        minHeight: 16,
-                                      ),
-                                      padding: const EdgeInsets.symmetric(
-                                        horizontal: 4,
-                                      ),
-                                      alignment: Alignment.center,
-                                      decoration: BoxDecoration(
-                                        color: NoolColors.tangerine,
-                                        border: Border.all(
-                                          color: NoolColors.ink,
-                                          width: 2,
-                                        ),
-                                      ),
-                                      child: Text(
-                                        count > 9 ? '9+' : '$count',
-                                        style: GoogleFonts.syne(
-                                          color: NoolColors.ink,
-                                          fontWeight: FontWeight.w800,
-                                          fontSize: 9,
-                                        ),
-                                      ),
-                                    ),
-                                  ),
-                              ],
-                            );
-                          },
+                        const NoolNotificationEntry(showRequests: true),
+                        IconButton(
+                          onPressed: _openSettings,
+                          tooltip: context.s.settings,
+                          icon: const Icon(
+                            Icons.settings_rounded,
+                            color: NoolColors.white,
+                            size: 24,
+                          ),
                         ),
                       ],
                     ),
@@ -467,79 +460,22 @@ class _ProfileScreenState extends State<ProfileScreen> {
                 SliverToBoxAdapter(child: _buildHeader()),
                 SliverToBoxAdapter(
                   child: Padding(
-                    padding: const EdgeInsets.fromLTRB(20, 8, 20, 16),
+                    padding: const EdgeInsets.fromLTRB(20, 4, 20, 16),
                     child: Row(
                       children: [
                         Expanded(
-                          child: BrutalShadow(
-                            offset: const Offset(4, 4),
-                            child: SizedBox(
-                              height: 48,
-                              child: ElevatedButton(
-                                onPressed: _openEditSheet,
-                                child: const Text('Profili Düzenle'),
-                              ),
-                            ),
+                          child: _ActionButton(
+                            label: context.s.editProfile,
+                            filled: true,
+                            onTap: _openEditSheet,
                           ),
                         ),
                         const SizedBox(width: 10),
-                        BrutalShadow(
-                          offset: const Offset(4, 4),
-                          child: Material(
-                            color: NoolColors.night,
-                            child: InkWell(
-                              onTap: _openBlockedSheet,
-                              child: Container(
-                                height: 48,
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 14,
-                                ),
-                                alignment: Alignment.center,
-                                decoration: BoxDecoration(
-                                  border: Border.all(
-                                    color: NoolColors.lavender,
-                                    width: 3,
-                                  ),
-                                ),
-                                child: Text(
-                                  'Engel',
-                                  style: GoogleFonts.syne(
-                                    color: NoolColors.lavender,
-                                    fontWeight: FontWeight.w800,
-                                  ),
-                                ),
-                              ),
-                            ),
-                          ),
-                        ),
-                        const SizedBox(width: 10),
-                        BrutalShadow(
-                          offset: const Offset(4, 4),
-                          child: Material(
-                            color: NoolColors.night,
-                            child: InkWell(
-                              onTap: _confirmLogout,
-                              child: Container(
-                                height: 48,
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 14,
-                                ),
-                                alignment: Alignment.center,
-                                decoration: BoxDecoration(
-                                  border: Border.all(
-                                    color: NoolColors.white,
-                                    width: 3,
-                                  ),
-                                ),
-                                child: Text(
-                                  'Çıkış',
-                                  style: GoogleFonts.syne(
-                                    color: NoolColors.white,
-                                    fontWeight: FontWeight.w800,
-                                  ),
-                                ),
-                              ),
-                            ),
+                        Expanded(
+                          child: _ActionButton(
+                            label: context.s.signOut,
+                            filled: false,
+                            onTap: _signOut,
                           ),
                         ),
                       ],
@@ -566,19 +502,28 @@ class _ProfileScreenState extends State<ProfileScreen> {
                           style: GoogleFonts.syne(
                             color: NoolColors.lavender,
                             fontWeight: FontWeight.w600,
-                            fontSize: 12,
+                            fontSize: 13,
                           ),
                         ),
                         const Spacer(),
-                        if (!_loading && _error == null)
-                          Text(
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 8,
+                            vertical: 4,
+                          ),
+                          decoration: BoxDecoration(
+                            color: NoolColors.acid,
+                            border: Border.all(color: NoolColors.ink, width: 2),
+                          ),
+                          child: Text(
                             '${_drops.length}',
                             style: GoogleFonts.syne(
-                              color: NoolColors.acid,
+                              color: NoolColors.ink,
                               fontWeight: FontWeight.w800,
-                              fontSize: 14,
+                              fontSize: 12,
                             ),
                           ),
+                        ),
                       ],
                     ),
                   ),
@@ -609,7 +554,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
                     hasScrollBody: false,
                     child: Center(
                       child: Text(
-                        'Henüz drop yok.\nKameradan kampüse bir kaos bırak.',
+                        context.s.noDropsYet,
                         textAlign: TextAlign.center,
                         style: GoogleFonts.syne(
                           color: NoolColors.lavender,
@@ -621,7 +566,12 @@ class _ProfileScreenState extends State<ProfileScreen> {
                   )
                 else
                   SliverPadding(
-                    padding: const EdgeInsets.fromLTRB(16, 0, 16, 32),
+                    padding: EdgeInsets.fromLTRB(
+                      16,
+                      0,
+                      16,
+                      widget.embedded ? 120 : 40,
+                    ),
                     sliver: SliverGrid(
                       gridDelegate:
                           const SliverGridDelegateWithFixedCrossAxisCount(
@@ -636,33 +586,14 @@ class _ProfileScreenState extends State<ProfileScreen> {
                           return _DropTile(
                             post: post,
                             onTap: () => _openDrop(post),
+                            onLongPress: () => _manageDrop(post),
+                            onManage: () => _manageDrop(post),
                           );
                         },
                         childCount: _drops.length,
                       ),
                     ),
                   ),
-                SliverToBoxAdapter(
-                  child: Padding(
-                    padding: EdgeInsets.fromLTRB(
-                      20,
-                      0,
-                      20,
-                      widget.embedded ? 120 : 40,
-                    ),
-                    child: TextButton(
-                      onPressed: _confirmDeleteAccount,
-                      child: Text(
-                        'Hesabımı Kalıcı Olarak Sil',
-                        style: GoogleFonts.syne(
-                          color: NoolColors.tangerine,
-                          fontWeight: FontWeight.w800,
-                          fontSize: 14,
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
               ],
             ),
           ),
@@ -679,27 +610,12 @@ class _ProfileScreenState extends State<ProfileScreen> {
       padding: const EdgeInsets.fromLTRB(24, 8, 24, 8),
       child: Column(
         children: [
-          BrutalShadow(
-            offset: const Offset(5, 5),
-            child: Container(
-              width: 112,
-              height: 112,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: NoolColors.night,
-                border: Border.all(color: NoolColors.acid, width: 4),
-              ),
-              clipBehavior: Clip.antiAlias,
-              child: avatarUrl != null && avatarUrl.isNotEmpty
-                  ? Image.network(
-                      avatarUrl,
-                      fit: BoxFit.cover,
-                      cacheWidth: 224,
-                      cacheHeight: 224,
-                      errorBuilder: (_, __, ___) => const _AvatarFallback(),
-                    )
-                  : const _AvatarFallback(),
-            ),
+          NoolAvatar(
+            size: 112,
+            borderWidth: 4,
+            imageUrl: avatarUrl,
+            showShadow: true,
+            fallbackIconSize: 48,
           ),
           const SizedBox(height: 18),
           Text(
@@ -715,7 +631,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
           ),
           const SizedBox(height: 10),
           Text(
-            bio.isEmpty ? 'Bio yok — kampüste kim olduğunu yaz.' : bio,
+            bio.isEmpty ? context.s.noBio : bio,
             textAlign: TextAlign.center,
             style: GoogleFonts.syne(
               color: NoolColors.lavender,
@@ -730,82 +646,62 @@ class _ProfileScreenState extends State<ProfileScreen> {
   }
 }
 
-class _AvatarFallback extends StatelessWidget {
-  const _AvatarFallback();
+class _ActionButton extends StatelessWidget {
+  const _ActionButton({
+    required this.label,
+    required this.filled,
+    required this.onTap,
+  });
 
-  @override
-  Widget build(BuildContext context) {
-    return ColoredBox(
-      color: NoolColors.acid.withOpacity(0.2),
-      child: const Center(
-      child: NoolIcon(
-        NoolIconData.person,
-        color: NoolColors.acid,
-        size: 48,
-      ),
-      ),
-    );
-  }
-}
-
-class _DropTile extends StatelessWidget {
-  const _DropTile({required this.post, required this.onTap});
-
-  final VibePost post;
+  final String label;
+  final bool filled;
   final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
-    return BrutalShadow(
-      offset: const Offset(3, 3),
-      child: Material(
-        color: Color.lerp(NoolColors.night, NoolColors.lavender, 0.15),
-        child: InkWell(
-          onTap: onTap,
-          child: Container(
-            decoration: BoxDecoration(
-              border: Border.all(color: NoolColors.ink, width: 3),
-            ),
-            child: Stack(
-              fit: StackFit.expand,
-              children: [
-                const Center(
-                  child: NoolIcon(
-                    NoolIconData.play,
-                    color: NoolColors.acid,
-                    size: 36,
-                  ),
-                ),
-                Positioned(
-                  left: 4,
-                  bottom: 4,
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 5,
-                      vertical: 2,
-                    ),
-                    decoration: BoxDecoration(
-                      color: NoolColors.acid,
-                      border: Border.all(color: NoolColors.ink, width: 2),
-                      boxShadow: const [
-                        BoxShadow(
-                          color: NoolColors.ink,
-                          offset: Offset(2, 2),
-                          blurRadius: 0,
-                        ),
-                      ],
-                    ),
-                    child: Text(
-                      '${post.vibeCount}',
-                      style: GoogleFonts.syne(
-                        color: NoolColors.ink,
-                        fontWeight: FontWeight.w800,
-                        fontSize: 10,
-                      ),
-                    ),
-                  ),
-                ),
-              ],
+    // filled = Profili Düzenle: morumsu (lavender) + beyaz yazı + kalın siyah kenar.
+    // outline = Sign out: night zemin + beyaz yazı.
+    // Material 3 surfaceTint kapalı — asit/lavender siyahlaşmasın.
+    final bg = filled ? NoolColors.lavender : NoolColors.night;
+    const fg = NoolColors.white;
+
+    return Material(
+      color: bg,
+      elevation: 0,
+      shadowColor: Colors.transparent,
+      surfaceTintColor: Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
+        splashColor: NoolColors.white.withValues(alpha: 0.12),
+        highlightColor: NoolColors.white.withValues(alpha: 0.06),
+        child: Container(
+          constraints: const BoxConstraints(minHeight: 48),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 14),
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            color: bg,
+            border: Border.all(color: NoolColors.ink, width: 3.5),
+            boxShadow: const [
+              BoxShadow(
+                color: NoolColors.ink,
+                offset: Offset(3, 3),
+                blurRadius: 0,
+              ),
+            ],
+          ),
+          child: FittedBox(
+            fit: BoxFit.scaleDown,
+            child: Text(
+              label,
+              textAlign: TextAlign.center,
+              maxLines: 1,
+              softWrap: false,
+              style: GoogleFonts.syne(
+                color: fg,
+                fontWeight: FontWeight.w800,
+                fontSize: 13,
+                height: 1.1,
+              ),
             ),
           ),
         ),
@@ -813,6 +709,180 @@ class _DropTile extends StatelessWidget {
     );
   }
 }
+
+class _DropTile extends StatelessWidget {
+  const _DropTile({
+    required this.post,
+    required this.onTap,
+    this.onLongPress,
+    this.onManage,
+  });
+
+  final VibePost post;
+  final VoidCallback onTap;
+  final VoidCallback? onLongPress;
+  final VoidCallback? onManage;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Color.lerp(NoolColors.night, NoolColors.lavender, 0.15),
+      child: InkWell(
+        onTap: onTap,
+        onLongPress: onLongPress,
+        child: Container(
+          decoration: BoxDecoration(
+            border: Border.all(color: NoolColors.lavender, width: 3),
+            boxShadow: const [
+              BoxShadow(
+                color: NoolColors.ink,
+                offset: Offset(3, 3),
+                blurRadius: 0,
+              ),
+            ],
+          ),
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              _DropVideoThumb(url: post.videoUrl),
+              const Center(
+                child: NoolIcon(
+                  NoolIconData.play,
+                  color: NoolColors.acid,
+                  size: 28,
+                ),
+              ),
+              if (onManage != null)
+                Positioned(
+                  top: 4,
+                  right: 4,
+                  child: Material(
+                    color: NoolColors.night,
+                    child: InkWell(
+                      onTap: onManage,
+                      child: Container(
+                        width: 28,
+                        height: 28,
+                        alignment: Alignment.center,
+                        decoration: BoxDecoration(
+                          border: Border.all(color: NoolColors.ink, width: 2),
+                          boxShadow: const [
+                            BoxShadow(
+                              color: NoolColors.ink,
+                              offset: Offset(2, 2),
+                              blurRadius: 0,
+                            ),
+                          ],
+                        ),
+                        child: const Icon(
+                          Icons.more_horiz,
+                          color: NoolColors.acid,
+                          size: 18,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              Positioned(
+                left: 4,
+                bottom: 4,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 5,
+                    vertical: 2,
+                  ),
+                  decoration: BoxDecoration(
+                    color: NoolColors.acid,
+                    border: Border.all(color: NoolColors.ink, width: 2),
+                  ),
+                  child: Text(
+                    '${post.vibeCount}',
+                    style: GoogleFonts.syne(
+                      color: NoolColors.ink,
+                      fontWeight: FontWeight.w800,
+                      fontSize: 10,
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Grid için video ilk karesi.
+class _DropVideoThumb extends StatefulWidget {
+  const _DropVideoThumb({required this.url});
+
+  final String url;
+
+  @override
+  State<_DropVideoThumb> createState() => _DropVideoThumbState();
+}
+
+class _DropVideoThumbState extends State<_DropVideoThumb> {
+  VideoPlayerController? _c;
+  bool _ready = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    if (widget.url.isEmpty) return;
+    try {
+      final c = VideoPlayerController.networkUrl(
+          await SupabaseService.instance.playableVideoUri(widget.url));
+      await c.initialize();
+      await c.setVolume(0);
+      await c.pause();
+      if (!mounted) {
+        await c.dispose();
+        return;
+      }
+      setState(() {
+        _c = c;
+        _ready = true;
+      });
+    } catch (_) {
+      if (mounted) setState(() => _ready = false);
+    }
+  }
+
+  @override
+  void dispose() {
+    _c?.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (!_ready || _c == null || !_c!.value.isInitialized) {
+      return ColoredBox(
+        color: NoolColors.lavender.withValues(alpha: 0.15),
+        child: const Center(
+          child: NoolLottieView.loading(width: 36, height: 36, compact: true),
+        ),
+      );
+    }
+    return FittedBox(
+      fit: BoxFit.cover,
+      clipBehavior: Clip.hardEdge,
+      child: SizedBox(
+        width: _c!.value.size.width,
+        height: _c!.value.size.height,
+        child: VideoPlayer(_c!),
+      ),
+    );
+  }
+}
+
+enum _AvatarPhotoAction { gallery, camera, remove }
 
 class _EditProfileSheet extends StatefulWidget {
   const _EditProfileSheet({
@@ -832,18 +902,20 @@ class _EditProfileSheet extends StatefulWidget {
 class _EditProfileSheetState extends State<_EditProfileSheet> {
   late final TextEditingController _userCtrl;
   late final TextEditingController _bioCtrl;
+  final _picker = ImagePicker();
+
   bool _saving = false;
   String? _error;
-  String? _pickedPath;
-  String? _previewUrl;
+  File? _localAvatar;
   bool _removeAvatar = false;
 
   @override
   void initState() {
     super.initState();
-    _userCtrl = TextEditingController(text: widget.initialUsername);
+    _userCtrl = TextEditingController(
+      text: widget.initialUsername.replaceFirst(RegExp(r'^@'), ''),
+    );
     _bioCtrl = TextEditingController(text: widget.initialBio);
-    _previewUrl = widget.initialAvatarUrl;
   }
 
   @override
@@ -853,100 +925,118 @@ class _EditProfileSheetState extends State<_EditProfileSheet> {
     super.dispose();
   }
 
-  bool get _hasAvatarPreview =>
-      _pickedPath != null ||
-      (!_removeAvatar && _previewUrl != null && _previewUrl!.isNotEmpty);
-
-  Future<void> _pickAvatar() async {
+  Future<void> _pick(ImageSource source) async {
+    setState(() => _error = null);
     try {
-      final choice = await showModalBottomSheet<_AvatarPickAction>(
-        context: context,
-        backgroundColor: Colors.transparent,
-        builder: (ctx) {
-          return Padding(
-            padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
-            child: BrutalShadow(
-              offset: const Offset(4, 4),
-              child: Container(
-                padding: const EdgeInsets.fromLTRB(16, 14, 16, 16),
-                decoration: BoxDecoration(
-                  color: NoolColors.night,
-                  border: Border.all(color: NoolColors.ink, width: 3),
-                ),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    Text(
-                      'Profil fotoğrafı',
-                      style: GoogleFonts.syne(
-                        color: NoolColors.acid,
-                        fontWeight: FontWeight.w800,
-                        fontSize: 18,
-                      ),
-                    ),
-                    const SizedBox(height: 12),
-                    _AvatarSourceTile(
-                      label: 'Galeriden seç',
-                      icon: NoolIconData.gallery,
-                      onTap: () =>
-                          Navigator.pop(ctx, _AvatarPickAction.gallery),
-                    ),
-                    const SizedBox(height: 8),
-                    _AvatarSourceTile(
-                      label: 'Kameradan çek',
-                      icon: NoolIconData.camera,
-                      onTap: () =>
-                          Navigator.pop(ctx, _AvatarPickAction.camera),
-                    ),
-                    if (_hasAvatarPreview) ...[
-                      const SizedBox(height: 8),
-                      _AvatarSourceTile(
-                        label: 'Fotoğrafı kaldır',
-                        icon: NoolIconData.close,
-                        danger: true,
-                        onTap: () =>
-                            Navigator.pop(ctx, _AvatarPickAction.remove),
-                      ),
-                    ],
-                  ],
-                ),
-              ),
-            ),
-          );
-        },
+      // requestFullMetadata: false → iOS PHPicker izin istemeden açılır
+      // (NSPhotoLibraryUsageDescription yine Info.plist'te durur).
+      final xfile = await _picker.pickImage(
+        source: source,
+        maxWidth: 1280,
+        maxHeight: 1280,
+        imageQuality: 88,
+        requestFullMetadata: false,
       );
+      if (xfile == null) return;
 
-      if (choice == null || !mounted) return;
-
-      if (choice == _AvatarPickAction.remove) {
-        setState(() {
-          _pickedPath = null;
-          _previewUrl = null;
-          _removeAvatar = true;
-          _error = null;
-        });
-        return;
+      // iOS PHPicker bazen path vermez / public.jpeg fail eder —
+      // bytes'ı temp dosyaya yaz.
+      final bytes = await xfile.readAsBytes();
+      if (bytes.isEmpty) {
+        throw StateError('Seçilen görsel boş.');
       }
-
-      final file = await ImagePicker().pickImage(
-        source: choice == _AvatarPickAction.camera
-            ? ImageSource.camera
-            : ImageSource.gallery,
-        maxWidth: 1024,
-        maxHeight: 1024,
-        imageQuality: 85,
+      final dir = await getTemporaryDirectory();
+      final out = File(
+        '${dir.path}/nool_avatar_${DateTime.now().millisecondsSinceEpoch}.jpg',
       );
-      if (file == null || !mounted) return;
+      await out.writeAsBytes(bytes, flush: true);
+
+      if (!mounted) return;
       setState(() {
-        _pickedPath = file.path;
-        _previewUrl = null;
+        _localAvatar = out;
         _removeAvatar = false;
-        _error = null;
       });
+    } on PlatformException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _error = source == ImageSource.gallery
+            ? 'Galeri açılamadı. Ayarlar → Nool → Fotoğraflar iznini kontrol et.'
+            : 'Kamera açılamadı. Ayarlar → Nool → Kamera iznini kontrol et.';
+      });
+      debugPrint('Avatar pick PlatformException: ${e.code} ${e.message}');
     } catch (e) {
       if (!mounted) return;
-      setState(() => _error = 'Fotoğraf seçilemedi: $e');
+      setState(() {
+        _error = 'Fotoğraf seçilemedi. Galeri veya kamerayı tekrar dene.';
+      });
+      debugPrint('Avatar pick error: $e');
+    }
+  }
+
+  Future<void> _showPhotoSheet() async {
+    // Seçimi sheet sonucu olarak al — pop + hemen pickImage iOS'ta
+    // "already presenting" ile PHPicker'ı kırar.
+    final action = await showModalBottomSheet<_AvatarPhotoAction>(
+      context: context,
+      backgroundColor: NoolColors.night,
+      shape: const RoundedRectangleBorder(
+        side: BorderSide(color: NoolColors.ink, width: 3),
+      ),
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              title: Text(
+                'Galeriden seç',
+                style: GoogleFonts.syne(
+                  color: NoolColors.white,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+              onTap: () => Navigator.pop(ctx, _AvatarPhotoAction.gallery),
+            ),
+            ListTile(
+              title: Text(
+                'Kameradan çek',
+                style: GoogleFonts.syne(
+                  color: NoolColors.white,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+              onTap: () => Navigator.pop(ctx, _AvatarPhotoAction.camera),
+            ),
+            ListTile(
+              title: Text(
+                'Fotoğrafı kaldır',
+                style: GoogleFonts.syne(
+                  color: NoolColors.tangerine,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+              onTap: () => Navigator.pop(ctx, _AvatarPhotoAction.remove),
+            ),
+          ],
+        ),
+      ),
+    );
+
+    if (!mounted || action == null) return;
+
+    // Sheet dismiss animasyonu bitsin; sonra native picker present edilsin.
+    await Future<void>.delayed(const Duration(milliseconds: 120));
+    if (!mounted) return;
+
+    switch (action) {
+      case _AvatarPhotoAction.gallery:
+        await _pick(ImageSource.gallery);
+      case _AvatarPhotoAction.camera:
+        await _pick(ImageSource.camera);
+      case _AvatarPhotoAction.remove:
+        setState(() {
+          _localAvatar = null;
+          _removeAvatar = true;
+        });
     }
   }
 
@@ -959,8 +1049,8 @@ class _EditProfileSheetState extends State<_EditProfileSheet> {
       final updated = await ProfileService().updateProfile(
         username: _userCtrl.text,
         bio: _bioCtrl.text,
-        avatarPath: _pickedPath,
-        removeAvatar: _removeAvatar,
+        avatarPath: _localAvatar?.path,
+        clearAvatar: _removeAvatar,
       );
       if (!mounted) return;
       Navigator.of(context).pop(updated);
@@ -968,456 +1058,192 @@ class _EditProfileSheetState extends State<_EditProfileSheet> {
       if (!mounted) return;
       setState(() {
         _saving = false;
-        _error = e.toString();
+        _error = userFacingError(e, context.s);
       });
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    final bottom = MediaQuery.viewInsetsOf(context).bottom;
+    final bottomInset = MediaQuery.viewInsetsOf(context).bottom;
+    final safeBottom = MediaQuery.paddingOf(context).bottom;
+    final maxH = MediaQuery.sizeOf(context).height * 0.92;
+    final previewUrl = _removeAvatar ? null : widget.initialAvatarUrl;
 
     return Padding(
-      padding: EdgeInsets.only(bottom: bottom),
-      child: ClipRRect(
-        borderRadius: const BorderRadius.vertical(top: Radius.circular(4)),
-        child: BackdropFilter(
-          filter: ImageFilter.blur(sigmaX: 18, sigmaY: 18),
-          child: Container(
-            padding: const EdgeInsets.fromLTRB(20, 14, 20, 24),
-            decoration: BoxDecoration(
-              color: NoolColors.night.withOpacity(0.82),
-              border: Border.all(color: NoolColors.ink, width: 3),
-            ),
-            child: SingleChildScrollView(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Center(
-                    child: Container(
-                      width: 40,
-                      height: 4,
-                      color: NoolColors.lavender,
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-                  Text(
-                    'Profili Düzenle',
-                    style: GoogleFonts.syne(
-                      color: NoolColors.acid,
-                      fontWeight: FontWeight.w800,
-                      fontSize: 22,
-                    ),
-                  ),
-                  const SizedBox(height: 18),
-                  Center(
-                    child: GestureDetector(
-                      onTap: _saving ? null : _pickAvatar,
-                      child: Stack(
-                        alignment: Alignment.bottomRight,
-                        children: [
-                          BrutalShadow(
-                            offset: const Offset(4, 4),
-                            child: Container(
-                              width: 96,
-                              height: 96,
-                              decoration: BoxDecoration(
-                                shape: BoxShape.circle,
-                                color: NoolColors.night,
-                                border: Border.all(
-                                  color: NoolColors.acid,
-                                  width: 3,
+      padding: EdgeInsets.only(bottom: bottomInset),
+      child: Align(
+        alignment: Alignment.bottomCenter,
+        child: ConstrainedBox(
+          constraints: BoxConstraints(maxHeight: maxH),
+          child: ClipRRect(
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(4)),
+            child: BackdropFilter(
+              filter: ImageFilter.blur(sigmaX: 18, sigmaY: 18),
+              child: Container(
+                decoration: BoxDecoration(
+                  color: NoolColors.night.withValues(alpha: 0.96),
+                  border: Border.all(color: NoolColors.acid, width: 3),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Expanded(
+                      child: SingleChildScrollView(
+                        padding: const EdgeInsets.fromLTRB(20, 14, 20, 12),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            Center(
+                              child: Container(
+                                width: 40,
+                                height: 4,
+                                color: NoolColors.lavender,
+                              ),
+                            ),
+                            const SizedBox(height: 16),
+                            Text(
+                              'Profili Düzenle',
+                              style: GoogleFonts.syne(
+                                color: NoolColors.acid,
+                                fontWeight: FontWeight.w800,
+                                fontSize: 22,
+                              ),
+                            ),
+                            const SizedBox(height: 16),
+                            Center(
+                              child: GestureDetector(
+                                onTap: _showPhotoSheet,
+                                child: Stack(
+                                  clipBehavior: Clip.none,
+                                  children: [
+                                    NoolAvatar(
+                                      size: 96,
+                                      borderWidth: 3.5,
+                                      imageUrl: previewUrl,
+                                      localFile: _localAvatar,
+                                      showShadow: true,
+                                      fallbackIconSize: 40,
+                                    ),
+                                    Positioned(
+                                      right: -2,
+                                      bottom: -2,
+                                      child: Container(
+                                        padding: const EdgeInsets.all(6),
+                                        decoration: BoxDecoration(
+                                          color: NoolColors.acid,
+                                          border: Border.all(
+                                            color: NoolColors.ink,
+                                            width: 2.5,
+                                          ),
+                                        ),
+                                        child: const Icon(
+                                          Icons.photo_camera_outlined,
+                                          size: 16,
+                                          color: NoolColors.ink,
+                                        ),
+                                      ),
+                                    ),
+                                  ],
                                 ),
                               ),
-                              clipBehavior: Clip.antiAlias,
-                              child: _pickedPath != null
-                                  ? Image.file(
-                                      File(_pickedPath!),
-                                      fit: BoxFit.cover,
-                                    )
-                                  : (!_removeAvatar &&
-                                          _previewUrl != null &&
-                                          _previewUrl!.isNotEmpty)
-                                      ? Image.network(
-                                          _previewUrl!,
-                                          fit: BoxFit.cover,
-                                          cacheWidth: 192,
-                                          cacheHeight: 192,
-                                          errorBuilder: (_, __, ___) =>
-                                              const _AvatarFallback(),
-                                        )
-                                      : const _AvatarFallback(),
                             ),
-                          ),
-                          Container(
-                            width: 32,
-                            height: 32,
+                            const SizedBox(height: 8),
+                            Text(
+                              context.s.tapPhotoHint,
+                              textAlign: TextAlign.center,
+                              style: GoogleFonts.syne(
+                                color: NoolColors.lavender,
+                                fontWeight: FontWeight.w500,
+                                fontSize: 12,
+                              ),
+                            ),
+                            const SizedBox(height: 16),
+                            _GlassField(
+                              controller: _userCtrl,
+                              label: context.s.usernameLabel,
+                            ),
+                            const SizedBox(height: 12),
+                            _GlassField(
+                              controller: _bioCtrl,
+                              label: context.s.bioLabel,
+                              maxLines: 3,
+                              maxLength: 150,
+                            ),
+                            if (_error != null) ...[
+                              const SizedBox(height: 8),
+                              Text(
+                                _error!,
+                                style: GoogleFonts.syne(
+                                  color: NoolColors.tangerine,
+                                  fontWeight: FontWeight.w600,
+                                  fontSize: 12,
+                                ),
+                              ),
+                            ],
+                          ],
+                        ),
+                      ),
+                    ),
+                    Padding(
+                      padding: EdgeInsets.fromLTRB(
+                        20,
+                        8,
+                        20,
+                        16 + (bottomInset > 0 ? 0 : safeBottom),
+                      ),
+                      child: Material(
+                        color: NoolColors.acid,
+                        elevation: 0,
+                        shadowColor: Colors.transparent,
+                        surfaceTintColor: Colors.transparent,
+                        child: InkWell(
+                          onTap: _saving ? null : _save,
+                          splashColor: NoolColors.ink.withValues(alpha: 0.12),
+                          highlightColor:
+                              NoolColors.ink.withValues(alpha: 0.06),
+                          child: Container(
+                            constraints: const BoxConstraints(minHeight: 54),
+                            alignment: Alignment.center,
                             decoration: BoxDecoration(
                               color: NoolColors.acid,
                               border: Border.all(
                                 color: NoolColors.ink,
-                                width: 2,
+                                width: 3.5,
                               ),
                               boxShadow: const [
                                 BoxShadow(
                                   color: NoolColors.ink,
-                                  offset: Offset(2, 2),
+                                  offset: Offset(4, 4),
                                   blurRadius: 0,
                                 ),
                               ],
                             ),
-                            child: const NoolIcon(
-                              NoolIconData.gallery,
-                              color: NoolColors.ink,
-                              size: 16,
-                            ),
+                            child: _saving
+                                ? const NoolLottieView.loading(
+                                    width: 28,
+                                    height: 28,
+                                    compact: true,
+                                  )
+                                : Text(
+                                    'KAYDET',
+                                    style: GoogleFonts.syne(
+                                      // Asit zemin → night metin (yüksek kontrast).
+                                      // M3 tint asidi karartırsa yine okunur kalsın diye w800.
+                                      color: NoolColors.night,
+                                      fontWeight: FontWeight.w800,
+                                      fontSize: 17,
+                                      letterSpacing: 0.4,
+                                    ),
+                                  ),
                           ),
-                        ],
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  Text(
-                    'Fotoğrafa dokun — galeri / kamera / kaldır',
-                    textAlign: TextAlign.center,
-                    style: GoogleFonts.syne(
-                      color: NoolColors.lavender,
-                      fontWeight: FontWeight.w600,
-                      fontSize: 12,
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-                  _GlassField(controller: _userCtrl, label: 'Kullanıcı adı'),
-                  const SizedBox(height: 12),
-                  _GlassField(
-                    controller: _bioCtrl,
-                    label: 'Bio (max 150)',
-                    maxLines: 3,
-                    maxLength: 150,
-                  ),
-                  if (_error != null) ...[
-                    const SizedBox(height: 8),
-                    Text(
-                      _error!,
-                      style: GoogleFonts.syne(
-                        color: NoolColors.tangerine,
-                        fontWeight: FontWeight.w600,
-                        fontSize: 12,
+                        ),
                       ),
                     ),
                   ],
-                  const SizedBox(height: 16),
-                  BrutalShadow(
-                    offset: const Offset(4, 4),
-                    child: SizedBox(
-                      height: 50,
-                      child: ElevatedButton(
-                        onPressed: _saving ? null : _save,
-                        child: _saving
-                            ? const NoolLottieView.loading(
-                                width: 28,
-                                height: 28,
-                                compact: true,
-                              )
-                            : const Text('KAYDET'),
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-enum _AvatarPickAction { gallery, camera, remove }
-
-class _AvatarSourceTile extends StatelessWidget {
-  const _AvatarSourceTile({
-    required this.label,
-    required this.icon,
-    required this.onTap,
-    this.danger = false,
-  });
-
-  final String label;
-  final NoolIconData icon;
-  final VoidCallback onTap;
-  final bool danger;
-
-  @override
-  Widget build(BuildContext context) {
-    final fg = danger ? NoolColors.tangerine : NoolColors.white;
-    return Material(
-      color: NoolColors.lavender.withOpacity(0.12),
-      child: InkWell(
-        onTap: onTap,
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 14),
-          decoration: BoxDecoration(
-            border: Border.all(
-              color: danger ? NoolColors.tangerine : NoolColors.ink,
-              width: 2,
-            ),
-          ),
-          child: Row(
-            children: [
-              NoolIcon(icon, color: fg, size: 20),
-              const SizedBox(width: 10),
-              Text(
-                label,
-                style: GoogleFonts.syne(
-                  color: fg,
-                  fontWeight: FontWeight.w700,
                 ),
               ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _BlockedUsersSheet extends StatefulWidget {
-  const _BlockedUsersSheet();
-
-  @override
-  State<_BlockedUsersSheet> createState() => _BlockedUsersSheetState();
-}
-
-class _BlockedUsersSheetState extends State<_BlockedUsersSheet> {
-  List<UserProfile> _blocked = const [];
-  bool _loading = true;
-  String? _error;
-  String? _busyId;
-
-  @override
-  void initState() {
-    super.initState();
-    _load();
-  }
-
-  Future<void> _load() async {
-    setState(() {
-      _loading = true;
-      _error = null;
-    });
-    try {
-      final list = await ProfileService().listBlockedUsers();
-      if (!mounted) return;
-      setState(() {
-        _blocked = list;
-        _loading = false;
-      });
-    } catch (e) {
-      if (!mounted) return;
-      setState(() {
-        _loading = false;
-        _error = e.toString();
-      });
-    }
-  }
-
-  Future<void> _unblock(UserProfile profile) async {
-    setState(() => _busyId = profile.id);
-    try {
-      await ProfileService().unblockUser(profile.id);
-      if (!mounted) return;
-      setState(() {
-        _blocked = _blocked.where((p) => p.id != profile.id).toList();
-        _busyId = null;
-      });
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          backgroundColor: NoolColors.acid,
-          content: Text(
-            'Engel kaldırıldı.',
-            style: GoogleFonts.syne(
-              color: NoolColors.ink,
-              fontWeight: FontWeight.w700,
             ),
-          ),
-        ),
-      );
-    } catch (e) {
-      if (!mounted) return;
-      setState(() => _busyId = null);
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          backgroundColor: NoolColors.tangerine,
-          content: Text(
-            'Kaldırılamadı: $e',
-            style: GoogleFonts.syne(
-              color: NoolColors.ink,
-              fontWeight: FontWeight.w700,
-            ),
-          ),
-        ),
-      );
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final height = MediaQuery.sizeOf(context).height * 0.55;
-
-    return ClipRRect(
-      borderRadius: const BorderRadius.vertical(top: Radius.circular(4)),
-      child: BackdropFilter(
-        filter: ImageFilter.blur(sigmaX: 16, sigmaY: 16),
-        child: Container(
-          height: height,
-          padding: const EdgeInsets.fromLTRB(20, 14, 20, 24),
-          decoration: BoxDecoration(
-            color: NoolColors.night.withOpacity(0.9),
-            border: Border.all(color: NoolColors.ink, width: 3),
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Center(
-                child: Container(
-                  width: 40,
-                  height: 4,
-                  color: NoolColors.lavender,
-                ),
-              ),
-              const SizedBox(height: 14),
-              Text(
-                'Engellenenler',
-                style: GoogleFonts.syne(
-                  color: NoolColors.acid,
-                  fontWeight: FontWeight.w800,
-                  fontSize: 22,
-                ),
-              ),
-              const SizedBox(height: 4),
-              Text(
-                'Engel kaldırınca tekrar squad isteği gidebilir.',
-                style: GoogleFonts.syne(
-                  color: NoolColors.lavender,
-                  fontWeight: FontWeight.w500,
-                  fontSize: 12,
-                ),
-              ),
-              const SizedBox(height: 12),
-              Expanded(
-                child: _loading
-                    ? const Center(
-                        child: NoolLottieView.loading(width: 72, height: 72),
-                      )
-                    : _error != null
-                        ? Center(
-                            child: Text(
-                              _error!,
-                              textAlign: TextAlign.center,
-                              style: GoogleFonts.syne(
-                                color: NoolColors.tangerine,
-                              ),
-                            ),
-                          )
-                        : _blocked.isEmpty
-                            ? Center(
-                                child: Text(
-                                  'Kimseyi engellemedin.',
-                                  style: GoogleFonts.syne(
-                                    color: NoolColors.lavender,
-                                    fontWeight: FontWeight.w600,
-                                  ),
-                                ),
-                              )
-                            : ListView.separated(
-                                itemCount: _blocked.length,
-                                separatorBuilder: (_, __) =>
-                                    const SizedBox(height: 10),
-                                itemBuilder: (context, index) {
-                                  final p = _blocked[index];
-                                  final name = p.username.startsWith('@')
-                                      ? p.username
-                                      : '@${p.username}';
-                                  final busy = _busyId == p.id;
-                                  return BrutalShadow(
-                                    offset: const Offset(3, 3),
-                                    child: Container(
-                                      padding: const EdgeInsets.all(12),
-                                      decoration: BoxDecoration(
-                                        color: NoolColors.lavender
-                                            .withOpacity(0.12),
-                                        border: Border.all(
-                                          color: NoolColors.ink,
-                                          width: 3,
-                                        ),
-                                      ),
-                                      child: Row(
-                                        children: [
-                                          Container(
-                                            width: 44,
-                                            height: 44,
-                                            decoration: BoxDecoration(
-                                              shape: BoxShape.circle,
-                                              border: Border.all(
-                                                color: NoolColors.acid,
-                                                width: 2,
-                                              ),
-                                            ),
-                                            clipBehavior: Clip.antiAlias,
-                                            child: p.avatarUrl != null &&
-                                                    p.avatarUrl!.isNotEmpty
-                                                ? Image.network(
-                                                    p.avatarUrl!,
-                                                    fit: BoxFit.cover,
-                                                    cacheWidth: 88,
-                                                    cacheHeight: 88,
-                                                    errorBuilder: (_, __, ___) =>
-                                                        const _AvatarFallback(),
-                                                  )
-                                                : const _AvatarFallback(),
-                                          ),
-                                          const SizedBox(width: 12),
-                                          Expanded(
-                                            child: Text(
-                                              name,
-                                              style: GoogleFonts.syne(
-                                                color: NoolColors.white,
-                                                fontWeight: FontWeight.w800,
-                                              ),
-                                            ),
-                                          ),
-                                          TextButton(
-                                            onPressed:
-                                                busy ? null : () => _unblock(p),
-                                            child: busy
-                                                ? const SizedBox(
-                                                    width: 18,
-                                                    height: 18,
-                                                    child:
-                                                        CircularProgressIndicator(
-                                                      strokeWidth: 2,
-                                                      color: NoolColors.acid,
-                                                    ),
-                                                  )
-                                                : Text(
-                                                    'Kaldır',
-                                                    style: GoogleFonts.syne(
-                                                      color: NoolColors.acid,
-                                                      fontWeight:
-                                                          FontWeight.w800,
-                                                    ),
-                                                  ),
-                                          ),
-                                        ],
-                                      ),
-                                    ),
-                                  );
-                                },
-                              ),
-              ),
-            ],
           ),
         ),
       ),
@@ -1440,30 +1266,27 @@ class _GlassField extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return BrutalShadow(
-      offset: const Offset(3, 3),
-      child: TextField(
-        controller: controller,
-        maxLines: maxLines,
-        maxLength: maxLength,
-        style: GoogleFonts.syne(
-          color: NoolColors.white,
-          fontWeight: FontWeight.w600,
+    return TextField(
+      controller: controller,
+      maxLines: maxLines,
+      maxLength: maxLength,
+      style: GoogleFonts.syne(
+        color: NoolColors.white,
+        fontWeight: FontWeight.w600,
+      ),
+      decoration: InputDecoration(
+        labelText: label,
+        labelStyle: GoogleFonts.syne(color: NoolColors.lavender),
+        filled: true,
+        fillColor: NoolColors.lavender.withValues(alpha: 0.12),
+        counterStyle: GoogleFonts.syne(color: NoolColors.lavender),
+        enabledBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(2),
+          borderSide: const BorderSide(color: NoolColors.ink, width: 3),
         ),
-        decoration: InputDecoration(
-          labelText: label,
-          labelStyle: GoogleFonts.syne(color: NoolColors.lavender),
-          filled: true,
-          fillColor: NoolColors.lavender.withOpacity(0.12),
-          counterStyle: GoogleFonts.syne(color: NoolColors.lavender),
-          enabledBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(2),
-            borderSide: const BorderSide(color: NoolColors.ink, width: 3),
-          ),
-          focusedBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(2),
-            borderSide: const BorderSide(color: NoolColors.acid, width: 3),
-          ),
+        focusedBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(2),
+          borderSide: const BorderSide(color: NoolColors.acid, width: 3),
         ),
       ),
     );
@@ -1490,28 +1313,19 @@ class _FullscreenDropPlayerState extends State<_FullscreenDropPlayer> {
   }
 
   Future<void> _init() async {
-    final c = VideoPlayerController.networkUrl(
-      Uri.parse(widget.post.videoUrl),
-    );
-    _controller = c;
     try {
+      final c = VideoPlayerController.networkUrl(
+        await SupabaseService.instance.playableVideoUri(widget.post.videoUrl),
+      );
       await c.initialize();
-      if (!mounted || _controller != c) {
-        await c.dispose();
-        if (_controller == c) _controller = null;
-        return;
-      }
       await c.setLooping(true);
       await c.play();
-      if (!mounted || _controller != c) {
+      if (!mounted) {
         await c.dispose();
-        if (_controller == c) _controller = null;
         return;
       }
-      setState(() {});
+      setState(() => _controller = c);
     } catch (e) {
-      await c.dispose();
-      if (_controller == c) _controller = null;
       if (!mounted) return;
       setState(() => _error = 'Video açılamadı.');
     }
@@ -1519,9 +1333,7 @@ class _FullscreenDropPlayerState extends State<_FullscreenDropPlayer> {
 
   @override
   void dispose() {
-    final c = _controller;
-    _controller = null;
-    c?.dispose();
+    _controller?.dispose();
     super.dispose();
   }
 

@@ -5,6 +5,12 @@ plugins {
     id "dev.flutter.flutter-gradle-plugin"
 }
 
+// Apply Google Services only when google-services.json exists (Firebase optional).
+def googleServicesJson = file("google-services.json")
+if (googleServicesJson.exists()) {
+    apply plugin: "com.google.gms.google-services"
+}
+
 def localProperties = new Properties()
 def localPropertiesFile = rootProject.file("local.properties")
 if (localPropertiesFile.exists()) {
@@ -25,8 +31,8 @@ if (flutterVersionName == null) {
 
 android {
     namespace = "com.example.nool"
-    // Android 16 (API 36+) — keep compile/target aligned with Play requirements
-    compileSdk = 36
+    // Android 15 (API 35+) — Play / 2026 target requirements
+    compileSdk = 35
     ndkVersion = flutter.ndkVersion
 
     compileOptions {
@@ -39,41 +45,20 @@ android {
     }
 
     defaultConfig {
-        // TODO: Replace with your real applicationId before Play Store publish
-        // (changing it creates a new app listing).
+        // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
         applicationId = "com.example.nool"
-        // Flutter 3.x default is 24; camera_android needs 23+, geolocator_android 24+
-        minSdk = Math.max(flutter.minSdkVersion as Integer, 24)
-        targetSdk = 36
+        // camera / video_player / supabase_flutter: min 23; target/compile 35+ for Android 15/16
+        minSdk = 23
+        targetSdk = 35
         versionCode = flutterVersionCode.toInteger()
         versionName = flutterVersionName
-        // Multidex is built into ART for minSdk >= 21 — no multidex library needed
     }
 
     buildTypes {
-        debug {
-            minifyEnabled false
-            shrinkResources false
-        }
         release {
-            // TODO: Add your own signing config for Play uploads.
-            // Debug keys keep `flutter run --release` working locally.
+            // TODO: Add your own signing config for the release build.
+            // Signing with the debug keys for now, so `flutter run --release` works.
             signingConfig = signingConfigs.debug
-
-            // R8 minify + resource shrink — keep rules in proguard-rules.pro
-            minifyEnabled true
-            shrinkResources true
-            proguardFiles(
-                getDefaultProguardFile("proguard-android-optimize.txt"),
-                "proguard-rules.pro"
-            )
-        }
-    }
-
-    packaging {
-        jniLibs {
-            // Compressed native libs → smaller APK / Play download (AGP 8+)
-            useLegacyPackaging = false
         }
     }
 }
